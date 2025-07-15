@@ -156,7 +156,7 @@
   ==
 ::
 +$  cause
-  $%  [%keygen entropy=byts salt=byts]
+  $%  [%keygen entropy=byts salt=byts keyname=(unit @t)]
       [%derive-child i=@ hardened=? label=(unit @tas)]
       [%import-keys keys=(list (pair trek meta))]
       [%export-keys ~]
@@ -181,8 +181,8 @@
       [%show-master-pubkey ~]
       [%show-master-privkey ~]
       [%show =path]
-      [%gen-master-privkey seedphrase=@t]
-      [%gen-master-pubkey privkey-b58=@t cc-b58=@t]
+      [%gen-master-privkey seedphrase=@t keyname=(unit @t)]
+      [%gen-master-pubkey privkey-b58=@t cc-b58=@t keyname=(unit @t)]
       [%update-balance ~]
       [%update-block ~]
       [%sync-run wrapped=cause]                         ::  run command after sync completes
@@ -1406,8 +1406,14 @@
     =/  master-privkey-coil=coil  [%coil [%prv private-key] chain-code]:cor
     =.  master.state  (some master-pubkey-coil)
     =.  state  set-receive-address:v
-    =/  public-label  `(crip "master-public-{<(end [3 4] public-key:cor)>}")
-    =/  private-label  `(crip "master-private-{<(end [3 4] public-key:cor)>}")
+    =/  public-label  
+      ?~  keyname.cause  
+        `(crip "master-public-{<(end [3 4] public-key:cor)>}")
+      `(crip "{(trip u.keyname.cause)}-public")
+    =/  private-label  
+      ?~  keyname.cause  
+        `(crip "master-private-{<(end [3 4] public-key:cor)>}")
+      `(crip "{(trip u.keyname.cause)}-private")
     =.  keys.state  (key:put:v master-privkey-coil ~ private-label)
     =.  keys.state  (key:put:v master-pubkey-coil ~ public-label)
     =.  keys.state  (seed:put:v seedphrase.cause)
@@ -1426,8 +1432,14 @@
     =/  master-pubkey-coil=coil  [%coil [%pub public-key] chain-code]:cor
     =/  master-privkey-coil=coil  [%coil [%prv private-key] chain-code]:cor
     %-  (debug "Generated master public key: {<public-key:cor>}")
-    =/  public-label  `(crip "master-public-{<(end [3 4] public-key:cor)>}")
-    =/  private-label  `(crip "master-private-{<(end [3 4] public-key:cor)>}")
+    =/  public-label  
+      ?~  keyname.cause  
+        `(crip "master-public-{<(end [3 4] public-key:cor)>}")
+      `(crip "{(trip u.keyname.cause)}-public")
+    =/  private-label  
+      ?~  keyname.cause  
+        `(crip "master-private-{<(end [3 4] public-key:cor)>}")
+      `(crip "{(trip u.keyname.cause)}-private")
     =.  master.state  (some master-pubkey-coil)
     =.  state  set-receive-address:v
     =.  keys.state  (key:put:v master-privkey-coil ~ private-label)
@@ -1437,7 +1449,7 @@
     :~  :-  %markdown
         %-  crip
         """
-        ## master public key
+        ## master public key{?~(keyname.cause "" " - {(trip u.keyname.cause)}")}
 
         {<public-key:cor>}
         """
@@ -1831,8 +1843,14 @@
     =.  state  set-receive-address:v
     %-  (debug "keygen: public key: {<(en:base58:wrap public-key:cor)>}")
     %-  (debug "keygen: private key: {<(en:base58:wrap private-key:cor)>}")
-    =/  pub-label  `(crip "master-public-{<(end [3 4] public-key:cor)>}")
-    =/  prv-label  `(crip "master-public-{<(end [3 4] public-key:cor)>}")
+    =/  pub-label  
+      ?~  keyname.cause  
+        `(crip "master-public-{<(end [3 4] public-key:cor)>}")
+      `(crip "{(trip u.keyname.cause)}-public")
+    =/  prv-label  
+      ?~  keyname.cause  
+        `(crip "master-private-{<(end [3 4] public-key:cor)>}")
+      `(crip "{(trip u.keyname.cause)}-private")
     =.  keys.state  (key:put:v master-public-coil ~ pub-label)
     =.  keys.state  (key:put:v master-private-coil ~ prv-label)
     =.  keys.state  (seed:put:v seed-phrase)
@@ -1840,7 +1858,7 @@
     :~  :-  %markdown
         %-  crip
         """
-        ## Keygen
+        ## Keygen{?~(keyname.cause "" " - {(trip u.keyname.cause)}")}
 
         ### New Public Key
         {<(en:base58:wrap public-key:cor)>}

@@ -80,7 +80,11 @@ fn validate_label(s: &str) -> Result<String, String> {
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Generate a new key pair
-    Keygen,
+    Keygen {
+        /// Name for the wallet/keyset
+        #[arg(short, long, value_parser = validate_label, default_value = "default")]
+        name: String,
+    },
 
     /// Derive child key (pub, private or both) from the current master key
     DeriveChild {
@@ -123,6 +127,9 @@ pub enum Commands {
         /// Seed phrase to generate master private key
         #[arg(short, long)]
         seedphrase: String,
+        /// Name for the wallet/keyset
+        #[arg(short, long, value_parser = validate_label, default_value = "default")]
+        name: String,
     },
 
     /// Generate a master public key from a master private key
@@ -133,6 +140,9 @@ pub enum Commands {
         /// Chain code (base58-encoded)
         #[arg(short, long)]
         chain_code: String,
+        /// Name for the wallet/keyset
+        #[arg(short, long, value_parser = validate_label, default_value = "default")]
+        name: String,
     },
 
     /// Perform a simple scan of the blockchain
@@ -223,7 +233,7 @@ pub enum Commands {
 impl Commands {
     fn as_wire_tag(&self) -> &'static str {
         match self {
-            Commands::Keygen => "keygen",
+            Commands::Keygen { .. } => "keygen",
             Commands::DeriveChild { .. } => "derive-child",
             Commands::ImportKeys { .. } => "import-keys",
             Commands::ExportKeys => "export-keys",
@@ -344,13 +354,21 @@ impl Wallet {
     /// # Arguments
     ///
     /// * `entropy` - The entropy to use for key generation.
-    fn keygen(entropy: &[u8; 32], sal: &[u8; 16]) -> CommandNoun<NounSlab> {
+    /// * `salt` - The salt to use for key generation.
+    /// * `name` - The name for the wallet/keyset.
+    fn keygen(entropy: &[u8; 32], salt: &[u8; 16], name: &str) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
         let ent: Byts = Byts::new(entropy.to_vec());
         let ent_noun = ent.into_noun(&mut slab);
-        let sal: Byts = Byts::new(sal.to_vec());
+        let sal: Byts = Byts::new(salt.to_vec());
         let sal_noun = sal.into_noun(&mut slab);
-        Self::wallet("keygen", &[ent_noun, sal_noun], Operation::Poke, &mut slab)
+        let name_noun = if name == "default" {
+            SIG  // Use null (~) for default name
+        } else {
+            let name_atom = make_tas(&mut slab, name).as_noun();
+            T(&mut slab, &[SIG, name_atom])  // Use (some name) for custom name
+        };
+        Self::wallet("keygen", &[ent_noun, sal_noun, name_noun], Operation::Poke, &mut slab)
     }
 
     // Derives a child key from current master key.
@@ -425,12 +443,19 @@ impl Wallet {
     /// # Arguments
     ///
     /// * `seedphrase` - The seed phrase to generate the master private key from.
-    fn gen_master_privkey(seedphrase: &str) -> CommandNoun<NounSlab> {
+    /// * `name` - The name for the wallet/keyset.
+    fn gen_master_privkey(seedphrase: &str, name: &str) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
         let seedphrase_noun = make_tas(&mut slab, seedphrase).as_noun();
+        let name_noun = if name == "default" {
+            SIG  // Use null (~) for default name
+        } else {
+            let name_atom = make_tas(&mut slab, name).as_noun();
+            T(&mut slab, &[SIG, name_atom])  // Use (some name) for custom name
+        };
         Self::wallet(
             "gen-master-privkey",
-            &[seedphrase_noun],
+            &[seedphrase_noun, name_noun],
             Operation::Poke,
             &mut slab,
         )
@@ -442,13 +467,20 @@ impl Wallet {
     ///
     /// * `master_privkey` - The master private key (base58-encoded)
     /// * `chain_code` - The chain code (base58-encoded)
-    fn gen_master_pubkey(master_privkey: &str, chain_code: &str) -> CommandNoun<NounSlab> {
+    /// * `name` - The name for the wallet/keyset.
+    fn gen_master_pubkey(master_privkey: &str, chain_code: &str, name: &str) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
         let key_noun = make_tas(&mut slab, master_privkey).as_noun();
         let chain_code_noun = make_tas(&mut slab, chain_code).as_noun();
+        let name_noun = if name == "default" {
+            SIG  // Use null (~) for default name
+        } else {
+            let name_atom = make_tas(&mut slab, name).as_noun();
+            T(&mut slab, &[SIG, name_atom])  // Use (some name) for custom name
+        };
         Self::wallet(
             "gen-master-pubkey",
-            &[key_noun, chain_code_noun],
+            &[key_noun, chain_code_noun, name_noun],
             Operation::Poke,
             &mut slab,
         )
@@ -827,7 +859,7 @@ async fn main() -> Result<(), NockAppError> {
     let requires_socket = match &cli.command {
         // Commands that DON'T need socket either because they don't sync
         // or they don't interact with the chain
-        Commands::Keygen
+        Commands::Keygen { .. }
         | Commands::DeriveChild { .. }
         | Commands::ImportKeys { .. }
         | Commands::ExportKeys
@@ -855,12 +887,12 @@ async fn main() -> Result<(), NockAppError> {
 
     // Generate the command noun and operation
     let poke = match &cli.command {
-        Commands::Keygen => {
+        Commands::Keygen { name } => {
             let mut entropy = [0u8; 32];
             let mut salt = [0u8; 16];
             getrandom(&mut entropy).map_err(|e| CrownError::Unknown(e.to_string()))?;
             getrandom(&mut salt).map_err(|e| CrownError::Unknown(e.to_string()))?;
-            Wallet::keygen(&entropy, &salt)
+            Wallet::keygen(&entropy, &salt, name)
         }
         Commands::DeriveChild {
             index,
@@ -870,11 +902,12 @@ async fn main() -> Result<(), NockAppError> {
         Commands::SignTx { draft, index } => Wallet::sign_tx(draft, *index),
         Commands::ImportKeys { input } => Wallet::import_keys(input),
         Commands::ExportKeys => Wallet::export_keys(),
-        Commands::GenMasterPrivkey { seedphrase } => Wallet::gen_master_privkey(seedphrase),
+        Commands::GenMasterPrivkey { seedphrase, name } => Wallet::gen_master_privkey(seedphrase, name),
         Commands::GenMasterPubkey {
             master_privkey,
             chain_code,
-        } => Wallet::gen_master_pubkey(master_privkey, chain_code),
+            name,
+        } => Wallet::gen_master_pubkey(master_privkey, chain_code, name),
         Commands::Scan {
             master_pubkey,
             search_depth,
@@ -1011,9 +1044,9 @@ mod tests {
         let mut salt = [0u8; 16];
         getrandom(&mut entropy).map_err(|e| CrownError::Unknown(e.to_string()))?;
         getrandom(&mut salt).map_err(|e| CrownError::Unknown(e.to_string()))?;
-        let (noun, op) = Wallet::keygen(&entropy, &salt)?;
+        let (noun, op) = Wallet::keygen(&entropy, &salt, "test")?;
 
-        let wire = WalletWire::Command(Commands::Keygen).to_wire();
+        let wire = WalletWire::Command(Commands::Keygen { name: "test".to_string() }).to_wire();
 
         let keygen_result = wallet.app.poke(wire, noun.clone()).await?;
 
@@ -1051,8 +1084,8 @@ mod tests {
         // Generate a new key pair
         let mut entropy = [0u8; 32];
         let mut salt = [0u8; 16];
-        let (noun, op) = Wallet::keygen(&entropy, &salt)?;
-        let wire = WalletWire::Command(Commands::Keygen).to_wire();
+        let (noun, op) = Wallet::keygen(&entropy, &salt, "test")?;
+        let wire = WalletWire::Command(Commands::Keygen { name: "test".to_string() }).to_wire();
         let _ = wallet.app.poke(wire, noun.clone()).await?;
 
         // Derive a child key
@@ -1148,10 +1181,11 @@ mod tests {
             .map_err(|e| CrownError::Unknown(e.to_string()))?;
         let mut wallet = Wallet::new(nockapp);
         let seedphrase = "correct horse battery staple";
-        let (noun, op) = Wallet::gen_master_privkey(seedphrase)?;
+        let (noun, op) = Wallet::gen_master_privkey(seedphrase, "test")?;
         println!("privkey_slab: {:?}", noun);
         let wire = WalletWire::Command(Commands::GenMasterPrivkey {
             seedphrase: seedphrase.to_string(),
+            name: "test".to_string(),
         })
         .to_wire();
         let privkey_result = wallet.app.poke(wire, noun.clone()).await?;
@@ -1181,10 +1215,11 @@ mod tests {
         let chain_code = "yr3PWpcne3t6ByqtHSmybAJkGqyHB41WNifc5qwNfWA";
 
         // Generate master public key from the private key and chain code
-        let (noun, op) = Wallet::gen_master_pubkey(master_privkey, chain_code)?;
+        let (noun, op) = Wallet::gen_master_pubkey(master_privkey, chain_code, "test")?;
         let wire = WalletWire::Command(Commands::GenMasterPubkey {
             master_privkey: master_privkey.to_string(),
             chain_code: chain_code.to_string(),
+            name: "test".to_string(),
         })
         .to_wire();
         let pubkey_result = wallet.app.poke(wire, noun.clone()).await?;
@@ -1364,12 +1399,13 @@ mod tests {
         let fee = 0;
 
         // generate keys
-        let (genkey_noun, genkey_op) = Wallet::gen_master_privkey("correct horse battery staple")?;
+        let (genkey_noun, genkey_op) = Wallet::gen_master_privkey("correct horse battery staple", "test")?;
         let (spend_noun, spend_op) =
             Wallet::simple_spend(names.clone(), recipients.clone(), gifts.clone(), fee, None)?;
 
         let wire1 = WalletWire::Command(Commands::GenMasterPrivkey {
             seedphrase: "correct horse battery staple".to_string(),
+            name: "test".to_string(),
         })
         .to_wire();
         let genkey_result = wallet.app.poke(wire1, genkey_noun.clone()).await?;
@@ -1467,6 +1503,361 @@ mod tests {
             !tx_result.is_empty(),
             "Expected non-empty transaction result"
         );
+
+        Ok(())
+    }
+
+    // Tests for keyname functionality
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_keygen_with_default_name() -> Result<(), NockAppError> {
+        init_tracing();
+        let cli = BootCli::parse_from(&["--new"]);
+
+        let prover_hot_state = produce_prover_hot_state();
+        let nockapp = boot::setup(
+            KERNEL,
+            Some(cli.clone()),
+            prover_hot_state.as_slice(),
+            "wallet",
+            None,
+        )
+        .await
+        .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let mut wallet = Wallet::new(nockapp);
+        let mut entropy = [0u8; 32];
+        let mut salt = [0u8; 16];
+        getrandom(&mut entropy).map_err(|e| CrownError::Unknown(e.to_string()))?;
+        getrandom(&mut salt).map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let (noun, op) = Wallet::keygen(&entropy, &salt, "default")?;
+
+        let wire = WalletWire::Command(Commands::Keygen { name: "default".to_string() }).to_wire();
+
+        let keygen_result = wallet.app.poke(wire, noun.clone()).await?;
+
+        println!("keygen result with default name: {:?}", keygen_result);
+        assert!(
+            keygen_result.len() == 2,
+            "Expected keygen result to be a list of 2 noun slabs - markdown and exit"
+        );
+        let exit_cause = unsafe { keygen_result[1].root() };
+        let code = exit_cause.as_cell()?.tail();
+        assert!(unsafe { code.raw_equals(&D(0)) }, "Expected exit code 0");
+
+        // Check that the markdown output contains the default keygen header
+        let markdown_slab = &keygen_result[0];
+        let markdown_root = unsafe { markdown_slab.root() };
+        let markdown_cell = markdown_root.as_cell()?;
+        let markdown_content_atom = markdown_cell.tail().as_atom()?;
+        let markdown_text = String::from_utf8_lossy(&markdown_content_atom.to_bytes_until_nul()?).to_string();
+        assert!(markdown_text.contains("## Keygen"), "Expected markdown to contain 'Keygen' header");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_keygen_with_custom_name() -> Result<(), NockAppError> {
+        init_tracing();
+        let cli = BootCli::parse_from(&["--new"]);
+
+        let prover_hot_state = produce_prover_hot_state();
+        let nockapp = boot::setup(
+            KERNEL,
+            Some(cli.clone()),
+            prover_hot_state.as_slice(),
+            "wallet",
+            None,
+        )
+        .await
+        .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let mut wallet = Wallet::new(nockapp);
+        let mut entropy = [0u8; 32];
+        let mut salt = [0u8; 16];
+        getrandom(&mut entropy).map_err(|e| CrownError::Unknown(e.to_string()))?;
+        getrandom(&mut salt).map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let (noun, op) = Wallet::keygen(&entropy, &salt, "testwallet")?;
+
+        let wire = WalletWire::Command(Commands::Keygen { name: "testwallet".to_string() }).to_wire();
+
+        let keygen_result = wallet.app.poke(wire, noun.clone()).await?;
+
+        println!("keygen result with custom name: {:?}", keygen_result);
+        assert!(
+            keygen_result.len() == 2,
+            "Expected keygen result to be a list of 2 noun slabs - markdown and exit"
+        );
+        let exit_cause = unsafe { keygen_result[1].root() };
+        let code = exit_cause.as_cell()?.tail();
+        assert!(unsafe { code.raw_equals(&D(0)) }, "Expected exit code 0");
+
+        // Check that the markdown output contains the custom keyname
+        let markdown_slab = &keygen_result[0];
+        let markdown_root = unsafe { markdown_slab.root() };
+        let markdown_cell = markdown_root.as_cell()?;
+        let markdown_content_atom = markdown_cell.tail().as_atom()?;
+        let markdown_text = String::from_utf8_lossy(&markdown_content_atom.to_bytes_until_nul()?).to_string();
+        assert!(markdown_text.contains("## Keygen - testwallet"), "Expected markdown to contain custom keyname");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_gen_master_privkey_with_default_name() -> Result<(), NockAppError> {
+        init_tracing();
+        let cli = BootCli::parse_from(&["--new"]);
+        let prover_hot_state = produce_prover_hot_state();
+        let nockapp = boot::setup(
+            KERNEL,
+            Some(cli.clone()),
+            prover_hot_state.as_slice(),
+            "wallet",
+            None,
+        )
+        .await
+        .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let mut wallet = Wallet::new(nockapp);
+        let seedphrase = "correct horse battery staple";
+        let (noun, op) = Wallet::gen_master_privkey(seedphrase, "default")?;
+        let wire = WalletWire::Command(Commands::GenMasterPrivkey {
+            seedphrase: seedphrase.to_string(),
+            name: "default".to_string(),
+        })
+        .to_wire();
+        let privkey_result = wallet.app.poke(wire, noun.clone()).await?;
+        
+        println!("gen_master_privkey result with default name: {:?}", privkey_result);
+        assert!(
+            privkey_result.len() == 1,
+            "Expected privkey result to be a list of 1 noun slab"
+        );
+        let exit_cause = unsafe { privkey_result[0].root() };
+        let code = exit_cause.as_cell()?.tail();
+        assert!(unsafe { code.raw_equals(&D(0)) }, "Expected exit code 0");
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_gen_master_privkey_with_custom_name() -> Result<(), NockAppError> {
+        init_tracing();
+        let cli = BootCli::parse_from(&["--new"]);
+        let prover_hot_state = produce_prover_hot_state();
+        let nockapp = boot::setup(
+            KERNEL,
+            Some(cli.clone()),
+            prover_hot_state.as_slice(),
+            "wallet",
+            None,
+        )
+        .await
+        .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let mut wallet = Wallet::new(nockapp);
+        let seedphrase = "correct horse battery staple";
+        let (noun, op) = Wallet::gen_master_privkey(seedphrase, "trading")?;
+        let wire = WalletWire::Command(Commands::GenMasterPrivkey {
+            seedphrase: seedphrase.to_string(),
+            name: "trading".to_string(),
+        })
+        .to_wire();
+        let privkey_result = wallet.app.poke(wire, noun.clone()).await?;
+        
+        println!("gen_master_privkey result with custom name: {:?}", privkey_result);
+        assert!(
+            privkey_result.len() == 1,
+            "Expected privkey result to be a list of 1 noun slab"
+        );
+        let exit_cause = unsafe { privkey_result[0].root() };
+        let code = exit_cause.as_cell()?.tail();
+        assert!(unsafe { code.raw_equals(&D(0)) }, "Expected exit code 0");
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_gen_master_pubkey_with_default_name() -> Result<(), NockAppError> {
+        init_tracing();
+        let cli = BootCli::parse_from(&["--new"]);
+        let prover_hot_state = produce_prover_hot_state();
+        let nockapp = boot::setup(
+            KERNEL,
+            Some(cli.clone()),
+            prover_hot_state.as_slice(),
+            "wallet",
+            None,
+        )
+        .await
+        .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let mut wallet = Wallet::new(nockapp);
+
+        let master_privkey = "5crSXzcevKKieL7VTZW2hy3guFgT6sserEXm3pWHZAnQ";
+        let chain_code = "yr3PWpcne3t6ByqtHSmybAJkGqyHB41WNifc5qwNfWA";
+
+        let (noun, op) = Wallet::gen_master_pubkey(master_privkey, chain_code, "default")?;
+        let wire = WalletWire::Command(Commands::GenMasterPubkey {
+            master_privkey: master_privkey.to_string(),
+            chain_code: chain_code.to_string(),
+            name: "default".to_string(),
+        })
+        .to_wire();
+        let pubkey_result = wallet.app.poke(wire, noun.clone()).await?;
+        
+        println!("gen_master_pubkey result with default name: {:?}", pubkey_result);
+        assert!(
+            pubkey_result.len() == 2,
+            "Expected pubkey result to be a list of 2 noun slabs - markdown and exit"
+        );
+        let exit_cause = unsafe { pubkey_result[1].root() };
+        let code = exit_cause.as_cell()?.tail();
+        assert!(unsafe { code.raw_equals(&D(0)) }, "Expected exit code 0");
+
+        // Check that the markdown output contains the default header
+        let markdown_slab = &pubkey_result[0];
+        let markdown_root = unsafe { markdown_slab.root() };
+        let markdown_cell = markdown_root.as_cell()?;
+        let markdown_content_atom = markdown_cell.tail().as_atom()?;
+        let markdown_text = String::from_utf8_lossy(&markdown_content_atom.to_bytes_until_nul()?).to_string();
+        assert!(markdown_text.contains("## master public key"), "Expected markdown to contain default header");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_gen_master_pubkey_with_custom_name() -> Result<(), NockAppError> {
+        init_tracing();
+        let cli = BootCli::parse_from(&["--new"]);
+        let prover_hot_state = produce_prover_hot_state();
+        let nockapp = boot::setup(
+            KERNEL,
+            Some(cli.clone()),
+            prover_hot_state.as_slice(),
+            "wallet",
+            None,
+        )
+        .await
+        .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let mut wallet = Wallet::new(nockapp);
+
+        let master_privkey = "5crSXzcevKKieL7VTZW2hy3guFgT6sserEXm3pWHZAnQ";
+        let chain_code = "yr3PWpcne3t6ByqtHSmybAJkGqyHB41WNifc5qwNfWA";
+
+        let (noun, op) = Wallet::gen_master_pubkey(master_privkey, chain_code, "savings")?;
+        let wire = WalletWire::Command(Commands::GenMasterPubkey {
+            master_privkey: master_privkey.to_string(),
+            chain_code: chain_code.to_string(),
+            name: "savings".to_string(),
+        })
+        .to_wire();
+        let pubkey_result = wallet.app.poke(wire, noun.clone()).await?;
+        
+        println!("gen_master_pubkey result with custom name: {:?}", pubkey_result);
+        assert!(
+            pubkey_result.len() == 2,
+            "Expected pubkey result to be a list of 2 noun slabs - markdown and exit"
+        );
+        let exit_cause = unsafe { pubkey_result[1].root() };
+        let code = exit_cause.as_cell()?.tail();
+        assert!(unsafe { code.raw_equals(&D(0)) }, "Expected exit code 0");
+
+        // Check that the markdown output contains the custom keyname
+        let markdown_slab = &pubkey_result[0];
+        let markdown_root = unsafe { markdown_slab.root() };
+        let markdown_cell = markdown_root.as_cell()?;
+        let markdown_content_atom = markdown_cell.tail().as_atom()?;
+        let markdown_text = String::from_utf8_lossy(&markdown_content_atom.to_bytes_until_nul()?).to_string();
+        assert!(markdown_text.contains("## master public key - savings"), "Expected markdown to contain custom keyname");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_keyname_validation() -> Result<(), NockAppError> {
+        init_tracing();
+        let cli = BootCli::parse_from(&["--new"]);
+        let prover_hot_state = produce_prover_hot_state();
+        let nockapp = boot::setup(
+            KERNEL,
+            Some(cli.clone()),
+            prover_hot_state.as_slice(),
+            "wallet",
+            None,
+        )
+        .await
+        .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let mut wallet = Wallet::new(nockapp);
+
+        // Test valid keynames
+        let valid_names = vec!["wallet1", "test-wallet", "my-keys", "trading123"];
+        for name in valid_names {
+            let mut entropy = [0u8; 32];
+            let mut salt = [0u8; 16];
+            getrandom(&mut entropy).map_err(|e| CrownError::Unknown(e.to_string()))?;
+            getrandom(&mut salt).map_err(|e| CrownError::Unknown(e.to_string()))?;
+            
+            // This should not panic or return an error
+            let result = Wallet::keygen(&entropy, &salt, name);
+            assert!(result.is_ok(), "Expected valid keyname '{}' to be accepted", name);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_multiple_wallets_with_different_names() -> Result<(), NockAppError> {
+        init_tracing();
+        let cli = BootCli::parse_from(&["--new"]);
+        let prover_hot_state = produce_prover_hot_state();
+        let nockapp = boot::setup(
+            KERNEL,
+            Some(cli.clone()),
+            prover_hot_state.as_slice(),
+            "wallet",
+            None,
+        )
+        .await
+        .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let mut wallet = Wallet::new(nockapp);
+
+        // Create multiple wallets with different names
+        let wallet_names = vec!["wallet1", "wallet2", "trading", "savings"];
+        
+        for name in wallet_names {
+            let mut entropy = [0u8; 32];
+            let mut salt = [0u8; 16];
+            getrandom(&mut entropy).map_err(|e| CrownError::Unknown(e.to_string()))?;
+            getrandom(&mut salt).map_err(|e| CrownError::Unknown(e.to_string()))?;
+            
+            let (noun, op) = Wallet::keygen(&entropy, &salt, name)?;
+            let wire = WalletWire::Command(Commands::Keygen { name: name.to_string() }).to_wire();
+            let result = wallet.app.poke(wire, noun.clone()).await?;
+            
+            assert!(
+                result.len() == 2,
+                "Expected keygen result to be a list of 2 noun slabs for wallet '{}'",
+                name
+            );
+            let exit_cause = unsafe { result[1].root() };
+            let code = exit_cause.as_cell()?.tail();
+            assert!(unsafe { code.raw_equals(&D(0)) }, "Expected exit code 0 for wallet '{}'", name);
+            
+            // Verify the markdown contains the correct keyname
+            let markdown_slab = &result[0];
+            let markdown_root = unsafe { markdown_slab.root() };
+            let markdown_cell = markdown_root.as_cell()?;
+            let markdown_content_atom = markdown_cell.tail().as_atom()?;
+            let markdown_text = String::from_utf8_lossy(&markdown_content_atom.to_bytes_until_nul()?).to_string();
+            assert!(
+                markdown_text.contains(&format!("## Keygen - {}", name)),
+                "Expected markdown to contain keyname '{}' in header",
+                name
+            );
+        }
 
         Ok(())
     }
