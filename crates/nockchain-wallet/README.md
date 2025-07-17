@@ -5,9 +5,30 @@
 ### Generate New Key Pair
 
 ```bash
-# Generate a new key pair with random entropy
+# Generate a new key pair with random entropy (uses "default" keyname)
 nockchain-wallet keygen
 ```
+
+### Managing Multiple Wallets
+
+The wallet supports managing multiple isolated wallets using the `--keyname` flag. Each keyname creates its own wallet with separate keys and data directory:
+
+```bash
+# Generate keys for default wallet
+nockchain-wallet keygen
+
+# Generate keys for a specific wallet
+nockchain-wallet --keyname mining keygen
+nockchain-wallet --keyname personal keygen
+
+# List public keys for a specific wallet
+nockchain-wallet --keyname mining list-pubkeys
+
+# Export keys from a specific wallet
+nockchain-wallet --keyname personal export-keys
+```
+
+If no `--keyname` is specified, the wallet uses "default" as the keyname. Each keyname maintains completely isolated key storage and wallet state.
 
 ### Importing and Exporting Keys
 

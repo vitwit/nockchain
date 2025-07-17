@@ -67,6 +67,23 @@ Now, copy the public key to the `.env` file:
 MINING_PUBKEY=<public-key>
 ```
 
+### Managing Multiple Wallets
+
+You can manage multiple wallets using the `--keyname` flag. If no keyname is specified, the wallet uses "default" as the keyname:
+
+```
+# Creates/uses default wallet
+nockchain-wallet keygen
+
+# Creates/uses a wallet named "mining"
+nockchain-wallet --keyname mining keygen
+
+# Creates/uses a wallet named "personal"
+nockchain-wallet --keyname personal keygen
+```
+
+Each keyname creates an isolated wallet with its own keys and data directory.
+
 ## Backup Keys
 
 To backup your keys, run:
