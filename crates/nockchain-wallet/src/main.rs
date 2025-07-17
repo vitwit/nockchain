@@ -40,7 +40,7 @@ struct WalletCli {
     #[arg(long, value_name = "PATH", help = "Custom home directory path for nockapp data")]
     home_dir: Option<PathBuf>,
 
-    #[arg(long, value_name = "NAME", help = "Name for the wallet key (creates isolated key storage)")]
+    #[arg(long, value_name = "NAME", help = "Name for the wallet key (default: 'default')")]
     keyname: Option<String>,
 }
 
@@ -808,6 +808,7 @@ pub async fn wallet_data_dir(custom_home_dir: Option<PathBuf>, keyname: Option<S
     let wallet_data_dir = if let Some(key_name) = keyname {
         base_dir.join("wallet").join(key_name)
     } else {
+        // use default value for the keyname
         base_dir.join("wallet").join("default")
     };
     
