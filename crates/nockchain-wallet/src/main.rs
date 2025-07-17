@@ -808,7 +808,7 @@ pub async fn wallet_data_dir(custom_home_dir: Option<PathBuf>, keyname: Option<S
     let wallet_data_dir = if let Some(key_name) = keyname {
         base_dir.join("wallet").join(key_name)
     } else {
-        base_dir.join("wallet")
+        base_dir.join("wallet").join("default")
     };
     
     if !wallet_data_dir.exists() {
@@ -833,14 +833,16 @@ fn prompt_for_consent(message: &str) -> Result<bool, NockAppError> {
 }
 
 fn check_wallet_exists(data_dir: &PathBuf) -> bool {
-    // Check if the wallet directory exists and is not empty
-    if !data_dir.exists() {
+    let checkpoints_dir = data_dir.join("wallet").join("checkpoints");
+    
+    // Check if the checkpoints directory exists
+    if !checkpoints_dir.exists() {
         return false;
     }
     
-    // Check if directory is not empty (contains any files or subdirectories)
-    if let Ok(mut entries) = std::fs::read_dir(data_dir) {
-        entries.next().is_some()
+    // Check if checkpoints directory contains any files
+    if let Ok(entries) = std::fs::read_dir(&checkpoints_dir) {
+        entries.filter_map(|entry| entry.ok()).any(|entry| entry.path().is_file())
     } else {
         false
     }
@@ -860,9 +862,13 @@ async fn get_all_wallet_keynames(base_wallet_dir: &PathBuf) -> Result<Vec<String
         .map_err(|e| CrownError::Unknown(format!("Failed to read directory entry: {}", e)))? {
         
         let path = entry.path();
+
         if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                keynames.push(name.to_string());
+            // Only include directories that contain at least one file (recursively)
+            if check_wallet_exists(&path) {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    keynames.push(name.to_string());
+                }
             }
         }
     }
@@ -893,7 +899,7 @@ async fn main() -> Result<(), NockAppError> {
                     keyname
                 )
             } else {
-                "WARNING: A wallet already exists with no key-name (default) and continuing this operation will override it.\nAre you sure to replace it?".to_string()
+                "WARNING: A wallet already exists with keyname 'default' and continuing this operation will override it.\nAre you sure to replace it?".to_string()
             };
             
             if !prompt_for_consent(&message)? {
