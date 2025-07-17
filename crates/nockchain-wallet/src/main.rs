@@ -38,6 +38,9 @@ struct WalletCli {
 
     #[arg(long, value_name = "PATH", help = "Custom home directory path for nockapp data")]
     home_dir: Option<PathBuf>,
+
+    #[arg(long, value_name = "NAME", help = "Name for the wallet key (creates isolated key storage)")]
+    keyname: Option<String>,
 }
 
 #[derive(Debug)]
@@ -794,13 +797,19 @@ impl Wallet {
     }
 }
 
-pub async fn wallet_data_dir(custom_home_dir: Option<PathBuf>) -> Result<PathBuf, NockAppError> {
+pub async fn wallet_data_dir(custom_home_dir: Option<PathBuf>, keyname: Option<String>) -> Result<PathBuf, NockAppError> {
     let base_dir = if let Some(custom_dir) = custom_home_dir {
         custom_dir
     } else {
         system_data_dir()
     };
-    let wallet_data_dir = base_dir.join("wallet");
+    
+    let wallet_data_dir = if let Some(key_name) = keyname {
+        base_dir.join("wallet").join(key_name)
+    } else {
+        base_dir.join("wallet")
+    };
+    
     if !wallet_data_dir.exists() {
         tokio_fs::create_dir_all(&wallet_data_dir)
             .await
@@ -817,7 +826,7 @@ async fn main() -> Result<(), NockAppError> {
     boot::init_default_tracing(&cli.boot.clone()); // Init tracing early
 
     let prover_hot_state = produce_prover_hot_state();
-    let data_dir = wallet_data_dir(cli.home_dir.clone()).await?;
+    let data_dir = wallet_data_dir(cli.home_dir.clone(), cli.keyname.clone()).await?;
 
     let kernel = boot::setup(
         KERNEL,
