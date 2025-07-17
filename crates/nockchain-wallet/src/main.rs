@@ -1,6 +1,7 @@
 #![allow(clippy::doc_overindented_list_items)]
 
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -820,6 +821,56 @@ pub async fn wallet_data_dir(custom_home_dir: Option<PathBuf>, keyname: Option<S
     Ok(wallet_data_dir)
 }
 
+fn prompt_for_consent(message: &str) -> Result<bool, NockAppError> {
+    print!("{} (y/N): ", message);
+    io::stdout().flush().map_err(|e| CrownError::Unknown(format!("Failed to flush stdout: {}", e)))?;
+    
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).map_err(|e| CrownError::Unknown(format!("Failed to read input: {}", e)))?;
+    
+    let input = input.trim().to_lowercase();
+    Ok(input == "y" || input == "yes")
+}
+
+fn check_wallet_exists(data_dir: &PathBuf) -> bool {
+    // Check if the wallet directory exists and is not empty
+    if !data_dir.exists() {
+        return false;
+    }
+    
+    // Check if directory is not empty (contains any files or subdirectories)
+    if let Ok(mut entries) = std::fs::read_dir(data_dir) {
+        entries.next().is_some()
+    } else {
+        false
+    }
+}
+
+async fn get_all_wallet_keynames(base_wallet_dir: &PathBuf) -> Result<Vec<String>, NockAppError> {
+    let mut keynames = Vec::new();
+    
+    if !base_wallet_dir.exists() {
+        return Ok(keynames);
+    }
+    
+    let mut entries = tokio_fs::read_dir(base_wallet_dir).await
+        .map_err(|e| CrownError::Unknown(format!("Failed to read wallet directory: {}", e)))?;
+    
+    while let Some(entry) = entries.next_entry().await
+        .map_err(|e| CrownError::Unknown(format!("Failed to read directory entry: {}", e)))? {
+        
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                keynames.push(name.to_string());
+            }
+        }
+    }
+    
+    keynames.sort();
+    Ok(keynames)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), NockAppError> {
     let cli = WalletCli::parse();
@@ -827,6 +878,30 @@ async fn main() -> Result<(), NockAppError> {
 
     let prover_hot_state = produce_prover_hot_state();
     let data_dir = wallet_data_dir(cli.home_dir.clone(), cli.keyname.clone()).await?;
+
+    // Check for consent on destructive operations
+    let destructive_commands = [
+        "keygen", "import-keys", "gen-master-privkey", "gen-master-pubkey", "import-master-pubkey"
+    ];
+    
+    let command_str = cli.command.as_wire_tag();
+    if destructive_commands.contains(&command_str) {
+        if check_wallet_exists(&data_dir) {
+            let message = if let Some(ref keyname) = cli.keyname {
+                format!(
+                    "WARNING: A wallet with name {} already exists and continuing this operation will override it.\nAre you sure to replace it?",
+                    keyname
+                )
+            } else {
+                "WARNING: A wallet already exists with no key-name (default) and continuing this operation will override it.\nAre you sure to replace it?".to_string()
+            };
+            
+            if !prompt_for_consent(&message)? {
+                println!("Operation cancelled.");
+                return Ok(());
+            }
+        }
+    }
 
     let kernel = boot::setup(
         KERNEL,
@@ -927,7 +1002,38 @@ async fn main() -> Result<(), NockAppError> {
         Commands::UpdateBalance => Wallet::update_balance(),
         Commands::ExportMasterPubkey => Wallet::export_master_pubkey(),
         Commands::ImportMasterPubkey { key_path } => Wallet::import_master_pubkey(key_path),
-        Commands::ListPubkeys => Wallet::list_pubkeys(),
+        Commands::ListPubkeys => {
+            // If no keyname specified, show available keynames and suggest usage
+            if cli.keyname.is_none() {
+                let base_wallet_dir = if let Some(ref custom_dir) = cli.home_dir {
+                    custom_dir.join("wallet")
+                } else {
+                    system_data_dir().join("wallet")
+                };
+                
+                let keynames = get_all_wallet_keynames(&base_wallet_dir).await?;
+                
+                if keynames.is_empty() {
+                    // No keyname directories found, check default wallet
+                    Wallet::list_pubkeys()
+                } else {
+                    // Show available keynames and return early
+                    println!("Available wallet keynames:");
+                    for keyname in &keynames {
+                        println!("  - {}", keyname);
+                    }
+                    println!("\nTo list pubkeys for a specific keyname, use:");
+                    println!("  nockchain-wallet --keyname <KEYNAME> list-pubkeys");
+                    println!("\nFor example:");
+                    for keyname in keynames.iter().take(2) {
+                        println!("  nockchain-wallet --keyname {} list-pubkeys", keyname);
+                    }
+                    return Ok(());
+                }
+            } else {
+                Wallet::list_pubkeys()
+            }
+        }
         Commands::ShowSeedphrase => Wallet::show_seedphrase(),
         Commands::ShowMasterPubkey => Wallet::show_master_pubkey(),
         Commands::ShowMasterPrivkey => Wallet::show_master_privkey(),
