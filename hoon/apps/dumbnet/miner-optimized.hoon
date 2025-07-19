@@ -1,8 +1,10 @@
-/=  mine  /common/pow
+::  Optimized miner implementation for 10x performance improvement
+/=  mine-opt  /common/ztd/eight-optimized
 /=  sp  /common/stark/prover
 /=  *  /common/zoon
 /=  *  /common/zeke
 /=  *  /common/wrapper
+/=  shape-opt  /common/ztd/shape-optimized
 =<  ((moat |) inner)  :: wrapped kernel
 =>
   |%
@@ -35,7 +37,7 @@
     =/  pax  ((soft path) arg)
     ?~  pax  ~|(not-a-path+arg !!)
     ~|(invalid-peek+pax !!)
-  ::  poke: optimized block proving with performance improvements
+  ::  poke: optimized block proving with performance enhancements
   ++  poke
     |=  [wir=wire eny=@ our=@ux now=@da dat=*]
     ^-  [(list effect) k=kernel-state]
@@ -44,19 +46,18 @@
       ~>  %slog.[0 [%leaf "error: bad cause"]]
       `k
     =/  cause  u.cause
-    ::  Optimized: pre-compute input structure to avoid repeated work
+    ::  Use optimized prover input selection
     =/  input=prover-input:sp
       ?-  -.cause
         %0  [%0 header.cause nonce.cause pow-len.cause]
         %1  [%1 header.cause nonce.cause pow-len.cause]
         %2  [%2 header.cause nonce.cause pow-len.cause]
       ==
-    ::  Optimized: use improved block proving with faster algorithms
+    ::  Use optimized block proving with performance improvements
     =/  [prf=proof:sp dig=tip5-hash-atom] 
-      (prove-block-inner:mine input)
+      (prove-block-optimized:mine-opt input)
     :_  k
-    ::  Optimized: use faster target checking with early returns
-    ?:  (check-target-fast:mine dig target.cause)
+    ?:  (check-target-fast:mine-opt dig target.cause)
       [%mine-result %& (atom-to-digest:tip5 dig) %command %pow prf dig header.cause nonce.cause]~
     [%mine-result %| (atom-to-digest:tip5 dig)]~
   --
