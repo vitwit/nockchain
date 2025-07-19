@@ -43,6 +43,8 @@ tracing.workspace = true
 tracing-test.workspace = true
 num_cpus = { workspace = true }
 rand = { workspace = true }
+fastrand = "2.0"
+log = "0.4"
 
 zkvm-jetpack.workspace = true
 

@@ -14,7 +14,6 @@ use nockchain_libp2p_io::tip5_util::tip5_hash_to_base58;
 use nockvm::interpreter::NockCancelToken;
 use nockvm::noun::{Atom, D, NO, T, YES};
 use nockvm_macros::tas;
-use rand::Rng;
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 use zkvm_jetpack::form::PRIME;
@@ -83,6 +82,22 @@ struct MiningData {
     pub version: NounSlab,
     pub target: NounSlab,
     pub pow_len: u64,
+}
+
+// Optimized nonce generation function
+fn create_optimized_nonce() -> NounSlab {
+    let mut nonce_slab = NounSlab::new();
+    let mut nonce_cell = Atom::from_value(&mut nonce_slab, fastrand::u64(..) % PRIME)
+        .expect("Failed to create nonce atom")
+        .as_noun();
+    for _ in 1..5 {
+        let nonce_atom = Atom::from_value(&mut nonce_slab, fastrand::u64(..) % PRIME)
+            .expect("Failed to create nonce atom")
+            .as_noun();
+        nonce_cell = T(&mut nonce_slab, &[nonce_atom, nonce_cell]);
+    }
+    nonce_slab.set_root(nonce_cell);
+    nonce_slab
 }
 
 pub fn create_mining_driver(
@@ -365,24 +380,12 @@ async fn start_mining_attempt(
     nonce: Option<NounSlab>,
     id: u64,
 ) {
-    let nonce = nonce.unwrap_or_else(|| {
-        let mut rng = rand::thread_rng();
-        let mut nonce_slab = NounSlab::new();
-        let mut nonce_cell = Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
-            .expect("Failed to create nonce atom")
-            .as_noun();
-        for _ in 1..5 {
-            let nonce_atom = Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
-                .expect("Failed to create nonce atom")
-                .as_noun();
-            nonce_cell = T(&mut nonce_slab, &[nonce_atom, nonce_cell]);
-        }
-        nonce_slab.set_root(nonce_cell);
-        nonce_slab
-    });
+    let nonce = nonce.unwrap_or_else(create_optimized_nonce);
+    
     let mining_data_ref = mining_data
         .as_ref()
         .expect("Mining data should already be initialized");
+        
     debug!(
         "starting mining attempt on thread {:?} on header {:?}with nonce: {:?}",
         id,
@@ -390,6 +393,7 @@ async fn start_mining_attempt(
             .expect("Failed to convert block header to Base58"),
         tip5_hash_to_base58(*unsafe { nonce.root() }).expect("Failed to convert nonce to Base58"),
     );
+    
     let poke_slab = create_poke(mining_data_ref, &nonce);
     mining_attempts.spawn(async move {
         let result = serf.poke(MiningWire::Candidate.to_wire(), poke_slab).await;
