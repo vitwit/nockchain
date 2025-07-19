@@ -56,7 +56,7 @@
       (prove-block-inner:mine input)
     :_  k
     ::  Optimized: use faster target checking with early returns
-    ?:  (check-target-fast:mine dig target.cause)
+    ?:  (check-target:mine dig target.cause)
       [%mine-result %& (atom-to-digest:tip5 dig) %command %pow prf dig header.cause nonce.cause]~
     [%mine-result %| (atom-to-digest:tip5 dig)]~
   --

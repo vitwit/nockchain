@@ -924,7 +924,6 @@
 ::  +powork-fast: optimized nock formula generation with pre-computed patterns
 ::
 ++  powork-fast
-  ~/  %powork-fast
   |=  n=@
   ^-  nock
   ?:  =(n 0)  [%1 0]
@@ -954,7 +953,6 @@
 ::  +gen-tree-fast: optimized tree generation with better cache locality
 ::
 ++  gen-tree-fast
-  ~/  %gen-tree-fast
   |=  leaves=(list @)
   ^-  *
   ?:  ?=([@ ~] leaves)
@@ -970,7 +968,6 @@
 ::  +split-fast: optimized list splitting with single-pass algorithm
 ::
 ++  split-fast
-  ~/  %split-fast
   |=  [idx=@ lis=(list @)]
   ^-  [(list @) (list @)]
   ?>  (lth idx (lent lis))
