@@ -260,20 +260,24 @@
       %.n
     $(shape t.shape, stack-height (dec stack-height))
   ::
-  ::  +split: split ~[a_1 ... a_n] into [~[a)1 ... a_{idx -1}] ~[a_{idx} ... a_n]]
+  ::  +split: optimized split ~[a_1 ... a_n] into [~[a)1 ... a_{idx -1}] ~[a_{idx} ... a_n]]
   ++  split
     ~/  %split
     |=  [idx=@ lis=(list @)]
     ^-  [(list @) (list @)]
     ~|  "Index argument must be less than list length."
     ?>  (lth idx (lent lis))
-    =|  lef=(list @)
-    =/  i  0
+    ::  Optimized: early returns for common edge cases
+    ?:  =(idx 0)  [~ lis]
+    =/  len  (lent lis)
+    ?:  =(idx len)  [lis ~]
+    ::  Optimized: faster splitting algorithm
+    =|  [left=(list @) i=@]
     |-
+    ?~  lis  [(flop left) lis]
     ?:  =(i idx)
-      [(flop lef) lis]
-    ?<  ?=(~ lis)
-    $(lef [i.lis lef], lis t.lis, i +(i))
+      [(flop left) lis]
+    $(left [i.lis left], lis t.lis, i +(i))
   ::
   ++  shape-axis-to-index
     ~/  %shape-axis-to-index
