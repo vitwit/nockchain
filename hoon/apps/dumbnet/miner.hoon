@@ -35,7 +35,7 @@
     =/  pax  ((soft path) arg)
     ?~  pax  ~|(not-a-path+arg !!)
     ~|(invalid-peek+pax !!)
-  ::  poke: optimized block proving with performance improvements
+  ::  poke: block proving
   ++  poke
     |=  [wir=wire eny=@ our=@ux now=@da dat=*]
     ^-  [(list effect) k=kernel-state]
@@ -44,18 +44,15 @@
       ~>  %slog.[0 [%leaf "error: bad cause"]]
       `k
     =/  cause  u.cause
-    ::  Optimized: pre-compute input structure to avoid repeated work
     =/  input=prover-input:sp
       ?-  -.cause
         %0  [%0 header.cause nonce.cause pow-len.cause]
         %1  [%1 header.cause nonce.cause pow-len.cause]
         %2  [%2 header.cause nonce.cause pow-len.cause]
       ==
-    ::  Optimized: use improved block proving with faster algorithms
     =/  [prf=proof:sp dig=tip5-hash-atom] 
       (prove-block-inner:mine input)
     :_  k
-    ::  Optimized: use faster target checking with early returns
     ?:  (check-target:mine dig target.cause)
       [%mine-result %& (atom-to-digest:tip5 dig) %command %pow prf dig header.cause nonce.cause]~
     [%mine-result %| (atom-to-digest:tip5 dig)]~

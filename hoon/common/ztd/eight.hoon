@@ -903,10 +903,10 @@
   =/  sponge  (new:sponge:tip5)
   =.  sponge  (absorb:sponge `(list belt)`[a b c d e f g h i j ~])
   =/  rng  (new:tog:tip5 sponge:sponge)
-  ::  Optimized: generate belts and build tree with optimized functions
+  ::  Generate belts and build tree
   =^  belts-list  rng  (belts:rng length)
-  =/  subj  (gen-tree-fast belts-list)
-  =/  form  (powork-fast length)
+  =/  subj  (gen-tree belts-list)
+  =/  form  (powork length)
   [subj form]
 ::
 ++  powork
@@ -921,24 +921,6 @@
   :-  [%6 [%3 %0 hed] [%0 0] [%0 hed]]
   nok
 ::
-::  +powork-fast: optimized nock formula generation with pre-computed patterns
-::
-++  powork-fast
-  |=  n=@
-  ^-  nock
-  ?:  =(n 0)  [%1 0]
-  ?:  =(n 1)  [%6 [%3 %0 1] [%0 0] [%0 1]]
-  ::  Pre-compute common pattern for better performance
-  =/  base-pattern  [%6 [%3 %0 n] [%0 0] [%0 n]]
-  =|  form=nock
-  =.  form  [%1 0]
-  =/  i  0
-  |-
-  ?:  =(i n)  form
-  =/  hed  (add n i)
-  =/  optimized-pattern  [%6 [%3 %0 hed] [%0 0] [%0 hed]]
-  =.  form  [optimized-pattern form]
-  $(i +(i))
 ::
 ++  gen-tree
   ~/  %gen-tree
@@ -950,33 +932,6 @@
   :-  $(leaves -:split-leaves)
   $(leaves +:split-leaves)
 ::
-::  +gen-tree-fast: optimized tree generation with better cache locality
-::
-++  gen-tree-fast
-  |=  leaves=(list @)
-  ^-  *
-  ?:  ?=([@ ~] leaves)
-    i.leaves
-  ?:  ?=([@ @ ~] leaves)
-    [i.leaves i.t.leaves]
-  =/  len  (lent leaves)
-  ?:  =(len 0)  !!
-  =/  mid  (div len 2)
-  =/  [left=(list @) right=(list @)]  (split-fast mid leaves)
-  [(gen-tree-fast left) (gen-tree-fast right)]
-::
-::  +split-fast: optimized list splitting with single-pass algorithm
-::
-++  split-fast
-  |=  [idx=@ lis=(list @)]
-  ^-  [(list @) (list @)]
-  ?>  (lth idx (lent lis))
-  =|  [left=(list @) i=@]
-  |-
-  ?~  lis  [(flop left) lis]
-  ?:  =(i idx)
-    [(flop left) lis]
-  $(left [i.lis left], lis t.lis, i +(i))
 ::
 --  ::  %pow
 ::
