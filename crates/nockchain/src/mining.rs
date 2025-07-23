@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
 use kernels::miner::KERNEL;
 use nockapp::kernel::form::SerfThread;
@@ -9,9 +10,9 @@ use nockapp::noun::slab::NounSlab;
 use nockapp::noun::{AtomExt, NounExt};
 use nockapp::save::SaveableCheckpoint;
 use nockapp::utils::NOCK_STACK_SIZE_TINY;
-use nockapp::CrownError;
-use nockchain_libp2p_io::tip5_util::tip5_hash_to_base58;
-use nockvm::interpreter::NockCancelToken;
+
+
+
 use nockvm::noun::{Atom, D, NO, T, YES};
 use nockvm_macros::tas;
 use rand::Rng;
@@ -129,135 +130,126 @@ pub fn create_mining_driver(
 
             info!("Starting mining driver with {} threads", num_threads);
 
-            let mut mining_attempts = tokio::task::JoinSet::<(
-                SerfThread<SaveableCheckpoint>,
-                u64,
-                Result<NounSlab, CrownError>,
-            )>::new();
             let hot_state = zkvm_jetpack::hot::produce_prover_hot_state();
             let test_jets_str = std::env::var("NOCK_TEST_JETS").unwrap_or_default();
             let test_jets = nockapp::kernel::boot::parse_test_jets(test_jets_str.as_str());
 
-            let mining_data: Mutex<Option<MiningData>> = Mutex::new(None);
-            let mut cancel_tokens: Vec<NockCancelToken> = Vec::<NockCancelToken>::new();
+            let mining_data: Arc<Mutex<Option<MiningData>>> = Arc::new(Mutex::new(None));
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+            let mining_handle = Arc::new(handle);
 
             loop {
-                tokio::select! {
-                        mining_result = mining_attempts.join_next(), if !mining_attempts.is_empty() => {
-                            let mining_result = mining_result.expect("Mining attempt failed");
-                            let (serf, id, slab_res) = mining_result.expect("Mining attempt result failed");
+                let mut threads = Vec::new();
+                let (version_slab, header_slab, target_slab, pow_len) = {
+                    let effect = mining_handle.next_effect().await.expect("Failed to get next effect");
+                    let effect_cell = unsafe { effect.root().as_cell() }.expect("Expected effect to be a cell");
+                    if !effect_cell.head().eq_bytes("mine") {
+                        continue;
+                    }
+                    let [version, commit, target, pow_len_noun] = effect_cell.tail().uncell().expect(
+                        "Expected three elements in %mine effect",
+                    );
+                    let mut version_slab = NounSlab::new();
+                    version_slab.copy_into(version);
+                    let mut header_slab = NounSlab::new();
+                    header_slab.copy_into(commit);
+                    let mut target_slab = NounSlab::new();
+                    target_slab.copy_into(target);
+                    let pow_len =
+                        pow_len_noun
+                            .as_atom()
+                            .expect("Expected pow-len to be an atom")
+                            .as_u64()
+                            .expect("Expected pow-len to be a u64");
+                    (version_slab, header_slab, target_slab, pow_len)
+                };
+
+                for i in 0..num_threads {
+                    let mining_handle = mining_handle.clone();
+                    let hot_state = hot_state.clone();
+                    let test_jets = test_jets.clone();
+                    let version_slab = version_slab.clone();
+                    let header_slab = header_slab.clone();
+                    let target_slab = target_slab.clone();
+                    let tx = tx.clone();
+
+                    threads.push(tokio::spawn(async move {
+                        let kernel = Vec::from(KERNEL);
+                        let serf = SerfThread::<SaveableCheckpoint>::new(
+                            kernel,
+                            None,
+                            hot_state,
+                            NOCK_STACK_SIZE_TINY,
+                            test_jets,
+                            false,
+                        )
+                        .await
+                        .expect("Could not load mining kernel");
+
+                        loop {
+                            let nonce = {
+                                let mut rng = rand::thread_rng();
+                                let mut nonce_slab = NounSlab::new();
+                                let mut nonce_cell =
+                                    Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
+                                        .expect("Failed to create nonce atom")
+                                        .as_noun();
+                                for _ in 1..5 {
+                                    let nonce_atom =
+                                        Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
+                                            .expect("Failed to create nonce atom")
+                                            .as_noun();
+                                    nonce_cell = T(&mut nonce_slab, &[nonce_atom, nonce_cell]);
+                                }
+                                nonce_slab.set_root(nonce_cell);
+                                nonce_slab
+                            };
+
+                            let poke_slab = create_poke(
+                                &MiningData {
+                                    block_header: header_slab.clone(),
+                                    version: version_slab.clone(),
+                                    target: target_slab.clone(),
+                                    pow_len,
+                                },
+                                &nonce,
+                            );
+
+                            let slab_res = serf.poke(MiningWire::Candidate.to_wire(), poke_slab).await;
                             let slab = slab_res.expect("Mining attempt result failed");
                             let result = unsafe { slab.root() };
-                            // If the mining attempt was cancelled, the goof goes into poke_swap which returns
-                            // %poke followed by the cancelled poke. So we check for hed = %poke
-                            // to identify a cancelled attempt.
                             let hed = result.as_cell().expect("Expected result to be a cell").head();
+
                             if hed.is_atom() && hed.eq_bytes("poke") {
-                                //  mining attempt was cancelled. restart with current block header.
-                                debug!("mining attempt cancelled. restarting on new block header. thread={id}");
-                                start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, id).await;
+                                debug!("mining attempt cancelled. restarting on new block header. thread={i}");
                             } else {
-                                //  there should only be one effect
                                 let effect = result.as_cell().expect("Expected result to be a cell").head();
                                 let [head, res, tail] = effect.uncell().expect("Expected three elements in mining result");
                                 if head.eq_bytes("mine-result") {
                                     if unsafe { res.raw_equals(&D(0)) } {
-                                        // success
-                                        // poke main kernel with mined block and start a new attempt
-                                        info!("Found block! thread={id}");
+                                        info!("Found block! thread={i}");
                                         let [hash, poke] = tail.uncell().expect("Expected two elements in tail");
                                         let mut poke_slab = NounSlab::new();
                                         poke_slab.copy_into(poke);
-                                        handle.poke(MiningWire::Mined.to_wire(), poke_slab).await.expect("Could not poke nockchain with mined PoW");
-
-                                        // launch new attempt
-                                        let mut nonce_slab = NounSlab::new();
-                                        nonce_slab.copy_into(hash);
-                                        start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, Some(nonce_slab), id).await;
+                                        tx.send(poke_slab).await.expect("Failed to send mined block");
+                                        break;
                                     } else {
-                                        // failure
-                                        //  launch new attempt, using hash as new nonce
-                                        //  nonce is tail
-                                        debug!("didn't find block, starting new attempt. thread={id}");
-                                        let mut nonce_slab = NounSlab::new();
-                                        nonce_slab.copy_into(tail);
-                                        start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, Some(nonce_slab), id).await;
+                                        debug!("didn't find block, starting new attempt. thread={i}");
                                     }
                                 }
                             }
                         }
+                    }));
+                }
 
-                    effect_res = handle.next_effect() => {
-                        let Ok(effect) = effect_res else {
-                            warn!("Error receiving effect in mining driver: {effect_res:?}");
-                            continue;
-                        };
-                        let Ok(effect_cell) = (unsafe { effect.root().as_cell() }) else {
-                            drop(effect);
-                            continue;
-                        };
+                if let Some(poke_slab) = rx.recv().await {
+                    mining_handle.poke(MiningWire::Mined.to_wire(), poke_slab).await.expect("Could not poke nockchain with mined PoW");
+                }
 
-                        if effect_cell.head().eq_bytes("mine") {
-                            let (version_slab, header_slab, target_slab, pow_len) = {
-                                let [version, commit, target, pow_len_noun] = effect_cell.tail().uncell().expect(
-                                    "Expected three elements in %mine effect",
-                                );
-                                let mut version_slab = NounSlab::new();
-                                version_slab.copy_into(version);
-                                let mut header_slab = NounSlab::new();
-                                header_slab.copy_into(commit);
-                                let mut target_slab = NounSlab::new();
-                                target_slab.copy_into(target);
-                                let pow_len =
-                                    pow_len_noun
-                                        .as_atom()
-                                        .expect("Expected pow-len to be an atom")
-                                        .as_u64()
-                                        .expect("Expected pow-len to be a u64");
-                                (version_slab, header_slab, target_slab, pow_len)
-                            };
-                            debug!("received new candidate block header: {:?}",
-                                tip5_hash_to_base58(*unsafe { header_slab.root() })
-                                .expect("Failed to convert header to Base58")
-                            );
-                            *(mining_data.lock().await) = Some(MiningData {
-                                block_header: header_slab,
-                                version: version_slab,
-                                target: target_slab,
-                                pow_len: pow_len
-                            });
-
-                            // Mining hasn't started yet, so start it
-                            if mining_attempts.is_empty() {
-                                info!("starting mining threads");
-                                for i in 0..num_threads {
-                                    let kernel = Vec::from(KERNEL);
-                                    let serf = SerfThread::<SaveableCheckpoint>::new(
-                                        kernel,
-                                        None,
-                                        hot_state.clone(),
-                                        NOCK_STACK_SIZE_TINY,
-                                        test_jets.clone(),
-                                        false,
-                                    )
-                                    .await
-                                    .expect("Could not load mining kernel");
-
-                                    cancel_tokens.push(serf.cancel_token.clone());
-
-                                    start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, i).await;
-                                }
-                                info!("mining threads started with {} threads", num_threads);
-                            } else {
-                                // Mining is already running so cancel all the running attemps
-                                // which are mining on the old block.
-                                debug!("restarting mining attempts with new block header.");
-                                for token in &cancel_tokens {
-                                    token.cancel();
-                                }
-                            }
-                        }
-                    }
+                for thread in threads {
+                    thread.abort();
                 }
             }
         })
@@ -354,45 +346,3 @@ async fn enable_mining(handle: &NockAppHandle, enable: bool) -> Result<PokeResul
         .await
 }
 
-async fn start_mining_attempt(
-    serf: SerfThread<SaveableCheckpoint>,
-    mining_data: tokio::sync::MutexGuard<'_, Option<MiningData>>,
-    mining_attempts: &mut tokio::task::JoinSet<(
-        SerfThread<SaveableCheckpoint>,
-        u64,
-        Result<NounSlab, CrownError>,
-    )>,
-    nonce: Option<NounSlab>,
-    id: u64,
-) {
-    let nonce = nonce.unwrap_or_else(|| {
-        let mut rng = rand::thread_rng();
-        let mut nonce_slab = NounSlab::new();
-        let mut nonce_cell = Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
-            .expect("Failed to create nonce atom")
-            .as_noun();
-        for _ in 1..5 {
-            let nonce_atom = Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
-                .expect("Failed to create nonce atom")
-                .as_noun();
-            nonce_cell = T(&mut nonce_slab, &[nonce_atom, nonce_cell]);
-        }
-        nonce_slab.set_root(nonce_cell);
-        nonce_slab
-    });
-    let mining_data_ref = mining_data
-        .as_ref()
-        .expect("Mining data should already be initialized");
-    debug!(
-        "starting mining attempt on thread {:?} on header {:?}with nonce: {:?}",
-        id,
-        tip5_hash_to_base58(*unsafe { mining_data_ref.block_header.root() })
-            .expect("Failed to convert block header to Base58"),
-        tip5_hash_to_base58(*unsafe { nonce.root() }).expect("Failed to convert nonce to Base58"),
-    );
-    let poke_slab = create_poke(mining_data_ref, &nonce);
-    mining_attempts.spawn(async move {
-        let result = serf.poke(MiningWire::Candidate.to_wire(), poke_slab).await;
-        (serf, id, result)
-    });
-}

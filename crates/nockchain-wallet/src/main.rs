@@ -1387,16 +1387,15 @@ mod tests {
         println!("Markdown content: {}", markdown_text);
 
         // Extract the private key from the markdown - it should be on a line with "- private key: "
-        let extracted_privkey_line = markdown_text
+        
+
+        // remove the "- private key: " prefix and get the base58 value directly
+        let extracted_privkey_b58 = markdown_text
             .lines()
-            .find(|line| line.trim().contains("private key: "))
+            .find(|line| line.trim().starts_with("- private key: "))
             .ok_or_else(|| {
                 CrownError::Unknown("Private key not found in markdown output".to_string())
             })?
-            .trim();
-
-        // remove the "- private key: " prefix and get the base58 value directly
-        let extracted_privkey_b58 = extracted_privkey_line
             .trim_start_matches("- private key: ")
             .trim()
             .to_string();
