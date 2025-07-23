@@ -17,7 +17,7 @@ use nockvm::noun::{Atom, D, NO, T, YES};
 use nockvm_macros::tas;
 use rand::Rng;
 use tokio::sync::Mutex;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 use zkvm_jetpack::form::PRIME;
 use zkvm_jetpack::noun::noun_ext::NounExt as OtherNounExt;
 
@@ -134,7 +134,7 @@ pub fn create_mining_driver(
             let test_jets_str = std::env::var("NOCK_TEST_JETS").unwrap_or_default();
             let test_jets = nockapp::kernel::boot::parse_test_jets(test_jets_str.as_str());
 
-            let mining_data: Arc<Mutex<Option<MiningData>>> = Arc::new(Mutex::new(None));
+            let _mining_data: Arc<Mutex<Option<MiningData>>> = Arc::new(Mutex::new(None));
 
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
@@ -167,7 +167,7 @@ pub fn create_mining_driver(
                 };
 
                 for i in 0..num_threads {
-                    let mining_handle = mining_handle.clone();
+                    let _mining_handle = mining_handle.clone();
                     let hot_state = hot_state.clone();
                     let test_jets = test_jets.clone();
                     let version_slab = version_slab.clone();
@@ -225,15 +225,27 @@ pub fn create_mining_driver(
                             if hed.is_atom() && hed.eq_bytes("poke") {
                                 debug!("mining attempt cancelled. restarting on new block header. thread={i}");
                             } else {
-                                let effect = result.as_cell().expect("Expected result to be a cell").head();
-                                let [head, res, tail] = effect.uncell().expect("Expected three elements in mining result");
+                                let Ok(result_cell) = result.as_cell() else {
+                                    error!("Expected result to be a cell but it wasn't");
+                                    continue;
+                                };
+                                let effect = result_cell.head();
+                                let Ok([head, res, tail]) = effect.uncell() else {
+                                    error!("Expected three elements in mining result but didn't find them");
+                                    continue;
+                                };
                                 if head.eq_bytes("mine-result") {
                                     if unsafe { res.raw_equals(&D(0)) } {
                                         info!("Found block! thread={i}");
-                                        let [hash, poke] = tail.uncell().expect("Expected two elements in tail");
+                                        let Ok([_hash, poke]) = tail.uncell() else {
+                                            error!("Expected two elements in tail but didn't find them");
+                                            continue;
+                                        };
                                         let mut poke_slab = NounSlab::new();
                                         poke_slab.copy_into(poke);
-                                        tx.send(poke_slab).await.expect("Failed to send mined block");
+                                        if let Err(e) = tx.send(poke_slab).await {
+                                            error!("Failed to send mined block: {e}");
+                                        }
                                         break;
                                     } else {
                                         debug!("didn't find block, starting new attempt. thread={i}");

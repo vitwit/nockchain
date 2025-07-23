@@ -6,7 +6,6 @@ use nockvm::mem::NockStack;
 use nockvm::noun::{Atom, Cell, IndirectAtom, Noun, D, NO, T, YES};
 use tracing::debug;
 
-use crate::form::mary::MarySlice;
 use crate::form::fext::{fadd, fmul};
 use crate::form::math::bpoly::*;
 use crate::form::poly::*;
@@ -51,7 +50,7 @@ pub fn bpadd_jet(context: &mut Context, subject: Noun) -> std::result::Result<No
     let bp = slot(sam, 2)?;
     let bq = slot(sam, 3)?;
 
-    let (Ok(mut bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
+    let (Ok(bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
         return jet_err();
     };
 
@@ -87,7 +86,7 @@ pub fn bpsub_jet(context: &mut Context, subject: Noun) -> std::result::Result<No
     let p = slot(sam, 2)?;
     let q = slot(sam, 3)?;
 
-    let (Ok(mut p_poly), Ok(q_poly)) = (BPolySlice::try_from(p), BPolySlice::try_from(q)) else {
+    let (Ok(p_poly), Ok(q_poly)) = (BPolySlice::try_from(p), BPolySlice::try_from(q)) else {
         return jet_err();
     };
 
@@ -125,7 +124,7 @@ pub fn bpmul_jet(context: &mut Context, subject: Noun) -> std::result::Result<No
     let bp = slot(sam, 2)?;
     let bq = slot(sam, 3)?;
 
-    let (Ok(mut bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
+    let (Ok(bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
         return jet_err();
     };
 

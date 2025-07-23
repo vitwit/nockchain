@@ -174,7 +174,7 @@ fn weighted_linear_combo(
         let mut denom = id_fpoly.to_vec();
         fpsub_in_place(&mut denom, x_poly);
 
-        let mut quotient = fpdiv_(&numerator, &denom);
+        let quotient = fpdiv_(&numerator, &denom);
 
         let mut weighted = quotient.to_vec();
         fpscal_in_place(scale, &mut weighted);

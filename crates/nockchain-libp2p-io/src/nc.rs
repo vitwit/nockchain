@@ -841,11 +841,10 @@ async fn handle_request_response(
                 let addr_str = addr.to_string();
                 debug!("Request received from peer at address {addr_str} with id {peer}");
                 let mut ip4_addr = None;
-                for proto in addr.iter() {
+                if let Some(proto) = addr.iter().next() {
                     if let Protocol::Ip4(ip4) = proto {
                         ip4_addr = Some(ip4);
                     }
-                    break;
                 }
                 if let Some(ip4) = ip4_addr {
                     let threshold_exceeded = message_tracker
