@@ -31,7 +31,8 @@ pub fn bpadd(a: &[Belt], b: &[Belt], res: &mut [Belt]) {
 pub fn bpadd_(left: &[Belt], right: &[Belt]) -> Vec<Belt> {
     let len = std::cmp::max(left.len(), right.len());
     let mut res = vec![Belt::zero(); len];
-    bpadd(left, right, res.as_mut_slice());
+    res[0..left.len()].copy_from_slice(left);
+    bpadd_in_place(&mut res, right);
     res
 }
 
@@ -91,7 +92,8 @@ pub fn bpsub_in_place(a: &mut [Belt], b: &[Belt]) {
 pub fn bpsub_(left: &[Belt], right: &[Belt]) -> Vec<Belt> {
     let len = std::cmp::max(left.len(), right.len());
     let mut res = vec![Belt::zero(); len];
-    bpsub(left, right, res.as_mut_slice());
+    res[0..left.len()].copy_from_slice(left);
+    bpsub_in_place(&mut res, right);
     res
 }
 
@@ -118,6 +120,23 @@ pub fn bpmul(a: &[Belt], b: &[Belt], res: &mut [Belt]) {
 }
 
 #[inline(always)]
+pub fn bpmul_in_place(a: &mut [Belt], b: &[Belt]) {
+    let a_len = a.len();
+    let b_len = b.len();
+
+    let mut res = vec![Belt::zero(); a_len + b_len - 1];
+
+    for i in 0..a_len {
+        if a[i] == Belt(0) {
+            continue;
+        }
+        for j in 0..b_len {
+            res[i + j] = res[i + j] + a[i] * b[j];
+        }
+    }
+    a.copy_from_slice(&res[0..a_len]);
+}
+
 pub fn bpmul_(left: &[Belt], right: &[Belt]) -> Vec<Belt> {
     let len = left.len() + right.len() - 1;
     let mut res = vec![Belt::zero(); len];
@@ -211,27 +230,26 @@ pub fn bitreverse(mut n: u32, l: u32) -> u32 {
 pub fn bp_fft(bp: &[Belt]) -> Result<Vec<Belt>, FieldError> {
     let order: Belt = Belt(bp.len() as u64);
     let root = order.ordered_root()?;
-    Ok(bp_ntt(bp, &root))
+    let mut res = bp.to_vec();
+    bp_ntt(&mut res, &root);
+    Ok(res)
 }
 
-pub fn bp_ntt(bp: &[Belt], root: &Belt) -> Vec<Belt> {
+pub fn bp_ntt(bp: &mut [Belt], root: &Belt) {
     let n = bp.len() as u32;
 
     if n == 1 {
-        return vec![bp[0]];
+        return;
     }
 
     debug_assert!(n.is_power_of_two());
 
     let log_2_of_n = n.ilog2();
 
-    let mut x: Vec<Belt> = vec![Belt(0); n as usize];
-    x.copy_from_slice(bp);
-
     for k in 0..n {
         let rk = bitreverse(k, log_2_of_n);
         if k < rk {
-            x.swap(rk as usize, k as usize);
+            bp.swap(rk as usize, k as usize);
         }
     }
 
@@ -244,10 +262,10 @@ pub fn bp_ntt(bp: &[Belt], root: &Belt) -> Vec<Belt> {
             let mut w = Belt(1);
 
             for j in 0..m {
-                let u: Belt = x[(k + j) as usize];
-                let v: Belt = x[(k + j + m) as usize] * w;
-                x[(k + j) as usize] = u + v;
-                x[(k + j + m) as usize] = u - v;
+                let u: Belt = bp[(k + j) as usize];
+                let v: Belt = bp[(k + j + m) as usize] * w;
+                bp[(k + j) as usize] = u + v;
+                bp[(k + j + m) as usize] = u - v;
                 w = w * w_m;
             }
 
@@ -256,7 +274,6 @@ pub fn bp_ntt(bp: &[Belt], root: &Belt) -> Vec<Belt> {
 
         m *= 2;
     }
-    x
 }
 
 #[inline(always)]
@@ -276,7 +293,8 @@ pub fn bp_coseword(bp: &[Belt], offset: &Belt, order: u32, root: &Belt) -> Vec<B
     let mut res = vec![Belt::zero(); len_res as usize];
     bp_shift(bp, offset, &mut res);
 
-    bp_ntt(&res, root)
+    bp_ntt(&mut res, root);
+    res
 }
 
 #[inline(always)]

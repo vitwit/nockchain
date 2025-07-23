@@ -1,11 +1,12 @@
 use nockvm::interpreter::Context;
 use nockvm::jets::list::util::flop;
 use nockvm::jets::util::slot;
-use nockvm::jets::{JetErr, Result};
+use nockvm::jets::JetErr;
 use nockvm::mem::NockStack;
 use nockvm::noun::{Atom, Cell, IndirectAtom, Noun, D, NO, T, YES};
 use tracing::debug;
 
+use crate::form::mary::MarySlice;
 use crate::form::fext::{fadd, fmul};
 use crate::form::math::bpoly::*;
 use crate::form::poly::*;
@@ -17,13 +18,13 @@ use crate::jets::utils::jet_err;
 use crate::noun::noun_ext::{AtomExt, NounExt};
 use crate::utils::is_hoon_list_end;
 
-pub fn bpoly_to_list_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bpoly_to_list_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let stack = &mut context.stack;
     let sam = slot(subject, 6)?;
     bpoly_to_list(stack, sam)
 }
 
-pub fn bpoly_to_list(stack: &mut NockStack, sam: Noun) -> Result {
+pub fn bpoly_to_list(stack: &mut NockStack, sam: Noun) -> std::result::Result<Noun, JetErr> {
     let Ok(sam_bpoly) = BPolySlice::try_from(sam) else {
         return jet_err();
     };
@@ -45,26 +46,27 @@ pub fn bpoly_to_list(stack: &mut NockStack, sam: Noun) -> Result {
     Ok(res_list)
 }
 
-pub fn bpadd_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bpadd_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
     let bp = slot(sam, 2)?;
     let bq = slot(sam, 3)?;
 
-    let (Ok(bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
+    let (Ok(mut bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
         return jet_err();
     };
 
     let res_len = std::cmp::max(bp_poly.len(), bq_poly.len());
     let (res, res_poly): (IndirectAtom, &mut [Belt]) =
         new_handle_mut_slice(&mut context.stack, Some(res_len as usize));
-    bpadd(bp_poly.0, bq_poly.0, res_poly);
+    res_poly[0..bp_poly.len()].copy_from_slice(bp_poly.0);
+    bpadd_in_place(res_poly, bq_poly.0);
 
     let res_cell = finalize_poly(&mut context.stack, Some(res_poly.len()), res);
 
     Ok(res_cell)
 }
 
-pub fn bpneg_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bpneg_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let bp = slot(subject, 6)?;
 
     let Ok(bp_poly) = BPolySlice::try_from(bp) else {
@@ -80,26 +82,27 @@ pub fn bpneg_jet(context: &mut Context, subject: Noun) -> Result {
     Ok(res_cell)
 }
 
-pub fn bpsub_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bpsub_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
     let p = slot(sam, 2)?;
     let q = slot(sam, 3)?;
 
-    let (Ok(p_poly), Ok(q_poly)) = (BPolySlice::try_from(p), BPolySlice::try_from(q)) else {
+    let (Ok(mut p_poly), Ok(q_poly)) = (BPolySlice::try_from(p), BPolySlice::try_from(q)) else {
         return jet_err();
     };
 
     let res_len = std::cmp::max(p_poly.len(), q_poly.len());
     let (res, res_poly): (IndirectAtom, &mut [Belt]) =
         new_handle_mut_slice(&mut context.stack, Some(res_len as usize));
-    bpsub(p_poly.0, q_poly.0, res_poly);
+    res_poly[0..p_poly.len()].copy_from_slice(p_poly.0);
+    bpsub_in_place(res_poly, q_poly.0);
 
     let res_cell = finalize_poly(&mut context.stack, Some(res_poly.len()), res);
 
     Ok(res_cell)
 }
 
-pub fn bpscal_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bpscal_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
     let c = slot(sam, 2)?;
     let bp = slot(sam, 3)?;
@@ -117,16 +120,16 @@ pub fn bpscal_jet(context: &mut Context, subject: Noun) -> Result {
     Ok(res_cell)
 }
 
-pub fn bpmul_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bpmul_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
     let bp = slot(sam, 2)?;
     let bq = slot(sam, 3)?;
 
-    let (Ok(bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
+    let (Ok(mut bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
         return jet_err();
     };
 
-    let res_len = if bp_poly.is_zero() | bq_poly.is_zero() {
+    let res_len = if bp_poly.is_zero() || bq_poly.is_zero() {
         1
     } else {
         bp_poly.len() + bq_poly.len() - 1
@@ -141,7 +144,7 @@ pub fn bpmul_jet(context: &mut Context, subject: Noun) -> Result {
     Ok(res_cell)
 }
 
-pub fn bp_hadamard_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bp_hadamard_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
     let bp = slot(sam, 2)?;
     let bq = slot(sam, 3)?;
@@ -160,27 +163,30 @@ pub fn bp_hadamard_jet(context: &mut Context, subject: Noun) -> Result {
     Ok(res_cell)
 }
 
-pub fn bp_ntt_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bp_ntt_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
-    let bp = slot(sam, 2)?;
-    let root = slot(sam, 3)?;
+    let bp_poly = BPolySlice::try_from(slot(sam, 2)?).unwrap_or_else(|err| {
+        panic!(
+            "Panicked with {err:?} at {}:{} (git sha: {:?})",
+            file!(),
+            line!(),
+            option_env!("GIT_SHA")
+        )
+    });
+    let root_64 = slot(sam, 7)?.as_atom()?.as_u64()?;
 
-    let (Ok(bp_poly), Ok(root_atom)) = (BPolySlice::try_from(bp), root.as_atom()) else {
-        return jet_err();
-    };
-    let root_64 = root_atom.as_u64()?;
-    let returned_bpoly = bp_ntt(bp_poly.0, &Belt(root_64));
-    // TODO: preallocate and pass res buffer into bp_ntt?
+    let mut res = bp_poly.0.to_vec();
+    bp_ntt(&mut res, &Belt(root_64));
+
     let (res_atom, res_poly): (IndirectAtom, &mut [Belt]) =
-        new_handle_mut_slice(&mut context.stack, Some(returned_bpoly.len() as usize));
-    res_poly.copy_from_slice(&returned_bpoly[..]);
+        new_handle_mut_slice(&mut context.stack, Some(res.len()));
+    res_poly.copy_from_slice(&res);
 
-    let res_cell: Noun = finalize_poly(&mut context.stack, Some(res_poly.len()), res_atom);
-
+    let res_cell = finalize_poly(&mut context.stack, Some(res_poly.len()), res_atom);
     Ok(res_cell)
 }
 
-pub fn bp_fft_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bp_fft_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let p = slot(subject, 6)?;
 
     let Ok(p_poly) = BPolySlice::try_from(p) else {
@@ -197,7 +203,7 @@ pub fn bp_fft_jet(context: &mut Context, subject: Noun) -> Result {
     Ok(res_cell)
 }
 
-pub fn bp_shift_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bp_shift_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
     let bp = slot(sam, 2)?;
     let c = slot(sam, 3)?;
@@ -214,7 +220,7 @@ pub fn bp_shift_jet(context: &mut Context, subject: Noun) -> Result {
     Ok(res_cell)
 }
 
-pub fn bp_coseword_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bp_coseword_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
     let p = slot(sam, 2)?;
     let offset = slot(sam, 6)?;
@@ -236,7 +242,7 @@ pub fn bp_coseword_jet(context: &mut Context, subject: Noun) -> Result {
     Ok(res_cell)
 }
 
-pub fn init_bpoly_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn init_bpoly_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let stack = &mut context.stack;
     let poly = slot(subject, 6)?;
 
@@ -259,7 +265,7 @@ pub fn init_bpoly(list_belt: HoonList, res_poly: &mut [Belt]) {
 //-------------------------------------------------------------------------
 //
 
-pub fn bp_is_zero_jet(_context: &mut Context, subject: Noun) -> Result {
+pub fn bp_is_zero_jet(_context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let p = slot(subject, 6)?;
 
     if bp_is_zero(p) {
@@ -285,7 +291,7 @@ pub fn get_bpoly_fields(bpoly: Noun) -> std::result::Result<(Atom, Atom), JetErr
 }
 
 // bpeval-lift: evaluate a bpoly at a felt
-pub fn bpeval_lift_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bpeval_lift_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let stack = &mut context.stack;
     let sam = slot(subject, 6)?;
     let [bp, x_noun] = sam.uncell()?; // TODO defaults? [bp=`bpoly`one-bpoly x=`felt`(lift 1)]
@@ -327,7 +333,7 @@ pub fn bpeval_lift_jet(context: &mut Context, subject: Noun) -> Result {
     }
 }
 
-pub fn bpdvr_jet(context: &mut Context, subject: Noun) -> Result {
+pub fn bpdvr_jet(context: &mut Context, subject: Noun) -> std::result::Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
     let ba = slot(sam, 2)?;
     let bb = slot(sam, 3)?;

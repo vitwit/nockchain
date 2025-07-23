@@ -10,35 +10,25 @@ use crate::jets::fpntt_jets::fp_ntt;
 use crate::noun::noun_ext::NounExt;
 
 #[inline(always)]
-pub fn fpadd(a: &[Felt], b: &[Felt], res: &mut [Felt]) {
-    let min: &[Felt];
-    let max: &[Felt];
-    if a.len() <= b.len() {
-        min = a;
-        max = b;
-    } else {
-        min = b;
-        max = a;
+pub fn fpadd(a: &mut [Felt], b: &[Felt]) {
+    let min_len = std::cmp::min(a.len(), b.len());
+    for i in 0..min_len {
+        let val_a = a[i];
+        let mut sum = Felt::zero();
+        fadd(&val_a, &b[i], &mut sum);
+        a[i] = sum;
     }
-
-    for ((res_vec, max_vec), min_vec) in res
-        .iter_mut()
-        .zip(max.iter())
-        .zip(min.iter().map(Some).chain(std::iter::repeat(None)))
-    {
-        if let Some(min_vec) = min_vec {
-            fadd(min_vec, max_vec, res_vec);
-        } else {
-            res_vec.copy_from_slice(max_vec);
-        }
-    }
+    // If a is longer than b, the remaining elements of a are unchanged.
+    // If b is longer than a, this function doesn't handle it, as it's designed for in-place addition
+    // where 'a' is the destination and is pre-sized to be at least as large as 'b'.
 }
 
 #[inline(always)]
 pub fn fpadd_(left: &[Felt], right: &[Felt]) -> Vec<Felt> {
     let len = max(left.len(), right.len());
     let mut res = vec![Felt::zero(); len];
-    fpadd(left, right, res.as_mut_slice());
+    res[0..left.len()].copy_from_slice(left);
+    fpadd(&mut res, right);
     res
 }
 
@@ -85,10 +75,8 @@ pub fn fpsub_in_place(a: &mut [Felt], b: &[Felt]) {
 pub fn fpsub_(left: &[Felt], right: &[Felt]) -> Vec<Felt> {
     let len = max(left.len(), right.len());
     let mut res = vec![Felt::zero(); len];
-    fpsub(left, right, res.as_mut_slice());
-
-    //  TODO: hoon impl does not normalize here, but maybe it should?
-    //normalize_poly(&mut res);
+    res[0..left.len()].copy_from_slice(left);
+    fpsub_in_place(&mut res, right);
     res
 }
 
@@ -112,6 +100,28 @@ pub fn fpmul(a: &[Felt], b: &[Felt], res: &mut [Felt]) {
             res[i + j] = result_felt;
         }
     }
+}
+
+#[inline(always)]
+pub fn fpmul_in_place(a: &mut [Felt], b: &[Felt]) {
+    let a_len = a.len();
+    let b_len = b.len();
+
+    let mut res = vec![Felt::zero(); a_len + b_len - 1];
+
+    for i in 0..a_len {
+        if a[i].is_zero() {
+            continue;
+        }
+        for j in 0..b_len {
+            let mut fmul_result: Felt = Felt::zero();
+            fmul(&a[i], &b[j], &mut fmul_result);
+            let mut fadd_result: Felt = Felt::zero();
+            fadd(&res[i + j], &fmul_result, &mut fadd_result);
+            res[i + j] = fadd_result;
+        }
+    }
+    a.copy_from_slice(&res[0..a_len]);
 }
 
 #[allow(dead_code)]
@@ -189,6 +199,20 @@ pub fn fpscal(c: &Felt, fp: &[Felt], res: &mut [Felt]) {
 
     for (res_vec, fp_vec) in res.iter_mut().zip(fp.iter()) {
         fmul(c, fp_vec, res_vec);
+    }
+}
+
+#[inline(always)]
+pub fn fpscal_in_place(c: &Felt, fp: &mut [Felt]) {
+    if fp.is_zero() {
+        fp.fill(Felt::zero());
+        return;
+    }
+
+    for i in 0..fp.len() {
+        let mut temp_felt = Felt::zero();
+        fmul(c, &fp[i], &mut temp_felt);
+        fp[i] = temp_felt;
     }
 }
 

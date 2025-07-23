@@ -19,8 +19,8 @@ pub fn precompute_ntts(
         let bp = snag_as_bpoly(polys, i);
         let mut extended = vec![Belt::zero(); new_len];
         bpoly_zero_extend(bp, &mut extended);
-        let fft = bp_fft(&extended)?;
-        res[i * new_len..(i + 1) * new_len].copy_from_slice(&fft);
+        bp_ntt(&mut extended, &Belt(new_len as u64).ordered_root()?);
+        res[i * new_len..(i + 1) * new_len].copy_from_slice(&extended);
     }
     Ok(())
 }
@@ -168,17 +168,18 @@ fn weighted_linear_combo(
     let id_fpoly: Vec<Felt> = vec![Felt::zero(), Felt::one()];
 
     for ((poly, scale), opening) in polys.iter().zip(weights.iter()).zip(openings) {
-        let opening = vec![*opening];
+        let mut numerator = poly.to_vec();
+        fpsub_in_place(&mut numerator, &[*opening]);
 
-        // acc += alpha*(f(x) - f(Z)  / x - Z)
-        let numerator = fpsub_(poly, opening.as_slice());
-        let denom = fpsub_(&id_fpoly, x_poly);
+        let mut denom = id_fpoly.to_vec();
+        fpsub_in_place(&mut denom, x_poly);
 
-        let quotient = fpdiv_(numerator.as_slice(), denom.as_slice());
+        let mut quotient = fpdiv_(&numerator, &denom);
 
-        let weighted = fpscal_(scale, quotient.as_slice());
+        let mut weighted = quotient.to_vec();
+        fpscal_in_place(scale, &mut weighted);
 
-        acc = fpadd_(acc.as_slice(), weighted.as_slice());
+        acc = fpadd_(&acc, &weighted);
     }
     acc
 }
