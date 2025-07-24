@@ -264,8 +264,8 @@ pub fn create_mining_driver_with_options(
                                 }
                                 
                                 // For H100 deployment, try restarting with a fresh serf if we keep getting bad results
-                                let mut mining_data_guard = mining_data.lock().await;
-                                if let Some(ref mining_data_ref) = *mining_data_guard {
+                                let mining_data_guard = mining_data.lock().await;
+                                if let Some(ref _mining_data_ref) = *mining_data_guard {
                                     warn!("Restarting mining thread {} due to invalid result format", id);
                                     
                                     // Create a fresh serf for this thread to avoid persistent issues
@@ -587,7 +587,7 @@ async fn start_gpu_mining_batch_if_available(
                 if miner.is_available() {
                     info!("Starting H100 GPU mining batch with {} nonces", miner.get_batch_size());
                     
-                    match miner.mine_batch(&version_owned, &header_owned, &target_owned, pow_len, start_nonce).await {
+                    match miner.mine_batch(version_owned, header_owned, target_owned, pow_len, start_nonce).await {
                         Ok(result) => {
                             if result.found_solution {
                                 info!("🎉 H100 GPU found solution!");

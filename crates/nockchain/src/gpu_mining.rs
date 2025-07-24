@@ -11,17 +11,15 @@ use cudarc::nvrtc::compile_ptx;
 #[cfg(feature = "opencl")]
 use opencl3::context::Context;
 #[cfg(feature = "opencl")]
-use opencl3::device::{get_all_devices, Device, CL_DEVICE_TYPE_GPU};
+use opencl3::device::Device;
 #[cfg(feature = "opencl")]
-use opencl3::kernel::{ExecuteKernel, Kernel};
+use opencl3::kernel::Kernel;
 #[cfg(feature = "opencl")]
-use opencl3::memory::{Buffer, CL_MEM_READ_ONLY, CL_MEM_WRITE_ONLY};
+use opencl3::memory::Buffer;
 #[cfg(feature = "opencl")]
 use opencl3::program::Program;
 #[cfg(feature = "opencl")]
 use opencl3::command_queue::CommandQueue;
-#[cfg(feature = "opencl")]
-use opencl3::types::CL_BLOCKING;
 
 // H100 optimized constants
 pub const GPU_BATCH_SIZE: usize = 8 * 1024 * 1024; // Process 8M nonces per batch for H100
@@ -182,10 +180,10 @@ impl GpuMiner {
     }
 
     pub async fn mine_batch(
-        &self,
-        version: &[u64; 5],
-        header: &[u64; 5], 
-        target: &[u64; 5],
+        self,
+        version: [u64; 5],
+        header: [u64; 5], 
+        target: [u64; 5],
         pow_len: u64,
         start_nonce: u64,
     ) -> Result<GpuMiningResult, String> {
@@ -196,11 +194,11 @@ impl GpuMiner {
         match &self.backend {
             #[cfg(feature = "cuda")]
             GpuBackend::Cuda(device) => {
-                self.mine_batch_cuda(device, version, header, target, pow_len, start_nonce).await
+                self.mine_batch_cuda(device, &version, &header, &target, pow_len, start_nonce).await
             }
             #[cfg(feature = "opencl")]
             GpuBackend::OpenCL { context, queue, kernel, .. } => {
-                self.mine_batch_opencl(context, queue, kernel, version, header, target, pow_len, start_nonce).await
+                self.mine_batch_opencl(context, queue, kernel, &version, &header, &target, pow_len, start_nonce).await
             }
             GpuBackend::None => {
                 Err("No GPU backend available".into())
@@ -451,7 +449,7 @@ impl GpuMiner {
         };
         
         let start_time = std::time::Instant::now();
-        let result = miner.mine_batch(&version, &header, &target, pow_len, start_nonce).await?;
+        let result = miner.mine_batch(version, header, target, pow_len, start_nonce).await?;
         let elapsed = start_time.elapsed();
         
         let hash_rate = result.processed_count as f64 / elapsed.as_secs_f64();
