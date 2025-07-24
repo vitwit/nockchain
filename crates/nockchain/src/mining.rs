@@ -236,24 +236,56 @@ pub fn create_mining_driver_with_options(
                             let (serf, id, slab_res) = mining_result.expect("Mining attempt result failed");
                             let slab = slab_res.expect("Mining attempt result failed");
                             let result = unsafe { slab.root() };
+                            
+                            // Check if result is a cell - if not, it might be an error or unexpected format
+                            if !result.is_cell() {
+                                warn!("Mining result is not a cell, restarting mining attempt. thread={id}");
+                                start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, id).await;
+                                continue;
+                            }
+                            
                             // If the mining attempt was cancelled, the goof goes into poke_swap which returns
                             // %poke followed by the cancelled poke. So we check for hed = %poke
                             // to identify a cancelled attempt.
-                            let hed = result.as_cell().expect("Expected result to be a cell").head();
+                            let result_cell = result.as_cell().expect("Already checked result is a cell");
+                            let hed = result_cell.head();
                             if hed.is_atom() && hed.eq_bytes("poke") {
                                 //  mining attempt was cancelled. restart with current block header.
                                 debug!("mining attempt cancelled. restarting on new block header. thread={id}");
                                 start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, id).await;
                             } else {
-                                //  there should only be one effect
-                                let effect = result.as_cell().expect("Expected result to be a cell").head();
-                                let [head, res, tail] = effect.uncell().expect("Expected three elements in mining result");
-                                if head.eq_bytes("mine-result") {
+                                // There should only be one effect
+                                let effect = result_cell.head();
+                                
+                                // Check if effect is a cell with the expected structure
+                                if !effect.is_cell() {
+                                    warn!("Mining effect is not a cell, restarting mining attempt. thread={id}");
+                                    start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, id).await;
+                                    continue;
+                                }
+                                
+                                let effect_result = effect.uncell();
+                                if effect_result.is_err() {
+                                    warn!("Mining effect could not be unpacked, restarting mining attempt. thread={id}");
+                                    start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, id).await;
+                                    continue;
+                                }
+                                
+                                let [head, res, tail] = effect_result.expect("Already checked effect structure");
+                                if head.is_atom() && head.eq_bytes("mine-result") {
                                     if unsafe { res.raw_equals(&D(0)) } {
                                         // success
                                         // poke main kernel with mined block and start a new attempt
                                         info!("Found block! thread={id}");
-                                        let [hash, poke] = tail.uncell().expect("Expected two elements in tail");
+                                        
+                                        // Check if tail can be unpacked properly
+                                        let tail_result = tail.uncell();
+                                        if tail_result.is_err() {
+                                            warn!("Mining success but tail could not be unpacked, restarting. thread={id}");
+                                            start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, id).await;
+                                            continue;
+                                        }
+                                        let [hash, poke] = tail_result.expect("Already checked tail structure");
                                         let mut poke_slab = NounSlab::new();
                                         poke_slab.copy_into(poke);
                                         handle.poke(MiningWire::Mined.to_wire(), poke_slab).await.expect("Could not poke nockchain with mined PoW");
@@ -287,9 +319,13 @@ pub fn create_mining_driver_with_options(
 
                         if effect_cell.head().eq_bytes("mine") {
                             let (version_slab, header_slab, target_slab, pow_len) = {
-                                let [version, commit, target, pow_len_noun] = effect_cell.tail().uncell().expect(
-                                    "Expected three elements in %mine effect",
-                                );
+                                // Check if effect tail can be unpacked properly
+                                let tail_result = effect_cell.tail().uncell();
+                                if tail_result.is_err() {
+                                    warn!("Mine effect tail could not be unpacked, skipping");
+                                    continue;
+                                }
+                                let [version, commit, target, pow_len_noun] = tail_result.expect("Already checked tail structure");
                                 let mut version_slab = NounSlab::new();
                                 version_slab.copy_into(version);
                                 let mut header_slab = NounSlab::new();
