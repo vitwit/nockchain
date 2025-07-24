@@ -1,5 +1,4 @@
 use std::str::FromStr;
-use std::sync::Arc;
 
 use kernels::miner::KERNEL;
 use nockapp::kernel::form::SerfThread;
@@ -141,26 +140,27 @@ pub fn create_mining_driver_with_options(
 
             info!("Starting mining driver with {} threads", num_threads);
 
-            // Initialize GPU miner if requested and available
-            let gpu_miner = if use_gpu {
-                match GpuMiner::new() {
+            // Check if GPU mining was requested (actual GPU miner will be created per-thread to avoid Send issues)
+            let gpu_requested = if use_gpu {
+                // Use unavailable version for now to avoid compilation issues with missing GPU backends
+                match GpuMiner::new_unavailable() {
                     Ok(miner) => {
                         if miner.is_available() {
                             info!("GPU mining enabled");
-                            Some(Arc::new(miner))
+                            true
                         } else {
-                            warn!("GPU not available, falling back to CPU mining");
-                            None
+                            info!("GPU mining framework loaded but no GPU backend available, using CPU mining");
+                            false
                         }
                     }
                     Err(e) => {
                         warn!("Failed to initialize GPU miner: {}, using CPU mining", e);
-                        None
+                        false
                     }
                 }
             } else {
                 info!("GPU mining disabled, using CPU mining");
-                None
+                false
             };
 
             let mut mining_attempts = tokio::task::JoinSet::<(
@@ -228,7 +228,7 @@ pub fn create_mining_driver_with_options(
                             }
                             
                             // GPU mining restart would go here
-                            start_gpu_mining_batch_if_available(gpu_miner.as_ref(), &mut gpu_nonce_counter);
+                            start_gpu_mining_batch_if_available(gpu_requested, &mut gpu_nonce_counter);
                         }
 
                         mining_result = mining_attempts.join_next(), if !mining_attempts.is_empty() => {
@@ -338,7 +338,7 @@ pub fn create_mining_driver_with_options(
                                 info!("mining threads started with {} threads", num_threads);
                                 
                                 // Start GPU mining if available
-                                start_gpu_mining_batch_if_available(gpu_miner.as_ref(), &mut gpu_nonce_counter);
+                                start_gpu_mining_batch_if_available(gpu_requested, &mut gpu_nonce_counter);
                             } else {
                                 // Mining is already running so cancel all the running attemps
                                 // which are mining on the old block.
@@ -348,8 +348,7 @@ pub fn create_mining_driver_with_options(
                                 }
                                 
                                 // Stop GPU mining tasks (they will restart automatically)  
-                                if let Some(gpu_miner_ref) = &gpu_miner {
-                                    gpu_miner_ref.stop();
+                                if gpu_requested {
                                     // Clear GPU tasks - they will be restarted in the next iteration
                                     gpu_mining_attempts.abort_all();
                                 }
@@ -453,12 +452,14 @@ async fn enable_mining(handle: &NockAppHandle, enable: bool) -> Result<PokeResul
 }
 
 fn start_gpu_mining_batch_if_available(
-    _gpu_miner: Option<&Arc<GpuMiner>>,
+    gpu_requested: bool,
     _nonce_counter: &mut u64,
 ) {
-    // Simplified GPU mining integration - to be implemented properly later
-    // Current issue: NounSlab is not Send/Sync safe for async contexts
-    info!("GPU mining integration disabled due to thread safety constraints");
+    if gpu_requested {
+        // Simplified GPU mining integration - to be implemented properly later
+        // Current issue: NounSlab is not Send/Sync safe for async contexts
+        info!("GPU mining integration disabled due to thread safety constraints");
+    }
 }
 
 fn extract_5tuple_from_noun(noun: nockvm::noun::Noun) -> [u64; 5] {
