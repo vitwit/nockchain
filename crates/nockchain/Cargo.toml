@@ -8,6 +8,10 @@ edition.workspace = true
 [features]
 bazel_build = []
 jemalloc = ["tikv-jemallocator"]
+cuda = ["cudarc"]
+opencl = ["opencl3"]
+gpu = ["cuda", "opencl"]
+default = []
 
 [dependencies]
 hoonc.workspace = true
@@ -45,6 +49,10 @@ num_cpus = { workspace = true }
 rand = { workspace = true }
 
 zkvm-jetpack.workspace = true
+
+# GPU mining dependencies (optional)
+cudarc = { version = "0.11", optional = true, features = ["cuda-12000"] }
+opencl3 = { version = "0.9", optional = true }
 
 [build-dependencies]
 vergen = { workspace = true, features = [

@@ -115,6 +115,12 @@ pub struct NockchainCli {
     pub fakenet_log_difficulty: Option<u64>,
     #[arg(long, help = "Path to fake genesis block jam file")]
     pub fakenet_genesis_jam_path: Option<PathBuf>,
+    #[arg(long, help = "Enable GPU mining (requires CUDA or OpenCL)", default_value = "false")]
+    pub gpu_mining: bool,
+    #[arg(long, help = "Disable GPU mining, use CPU only", default_value = "false")]
+    pub no_gpu: bool,
+    #[arg(long, help = "GPU batch size for mining (default: 1048576)")]
+    pub gpu_batch_size: Option<usize>,
 }
 
 impl NockchainCli {
@@ -128,6 +134,12 @@ impl NockchainCli {
         if self.mining_pubkey.is_some() && self.mining_key_adv.is_some() {
             return Err(
                 "Cannot specify both mining_pubkey and mining_key_adv at the same time".to_string(),
+            );
+        }
+
+        if self.gpu_mining && self.no_gpu {
+            return Err(
+                "Cannot specify both --gpu-mining and --no-gpu at the same time".to_string(),
             );
         }
 

@@ -1,6 +1,10 @@
 pub mod config;
 pub mod mining;
+pub mod gpu_mining;
 pub mod setup;
+
+#[cfg(test)]
+mod gpu_mining_test;
 
 use std::error::Error;
 use std::fs;
@@ -470,8 +474,14 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         })
         .expect("Failed to get number of threads for mining");
 
-    let mining_driver =
-        crate::mining::create_mining_driver(mining_config, mine, threads, Some(mining_init_tx));
+    let use_gpu = cli.as_ref().map_or(false, |c| c.gpu_mining && !c.no_gpu);
+    let mining_driver = crate::mining::create_mining_driver_with_options(
+        mining_config, 
+        mine, 
+        threads, 
+        Some(mining_init_tx),
+        use_gpu
+    );
     nockapp.add_io_driver(mining_driver).await;
 
     let libp2p_driver = nockchain_libp2p_io::driver::make_libp2p_driver(

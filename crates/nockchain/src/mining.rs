@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
 use kernels::miner::KERNEL;
 use nockapp::kernel::form::SerfThread;
@@ -19,6 +20,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 use zkvm_jetpack::form::PRIME;
 use zkvm_jetpack::noun::noun_ext::NounExt as OtherNounExt;
+use crate::gpu_mining::{GpuMiner, GpuMiningResult};
 
 pub enum MiningWire {
     Mined,
@@ -91,6 +93,16 @@ pub fn create_mining_driver(
     num_threads: u64,
     init_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> IODriverFn {
+    create_mining_driver_with_options(mining_config, mine, num_threads, init_complete_tx, true)
+}
+
+pub fn create_mining_driver_with_options(
+    mining_config: Option<Vec<MiningKeyConfig>>,
+    mine: bool,
+    num_threads: u64,
+    init_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    use_gpu: bool,
+) -> IODriverFn {
     Box::new(move |handle| {
         Box::pin(async move {
             let Some(configs) = mining_config else {
@@ -129,20 +141,96 @@ pub fn create_mining_driver(
 
             info!("Starting mining driver with {} threads", num_threads);
 
+            // Initialize GPU miner if requested and available
+            let gpu_miner = if use_gpu {
+                match GpuMiner::new() {
+                    Ok(miner) => {
+                        if miner.is_available() {
+                            info!("GPU mining enabled");
+                            Some(Arc::new(miner))
+                        } else {
+                            warn!("GPU not available, falling back to CPU mining");
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize GPU miner: {}, using CPU mining", e);
+                        None
+                    }
+                }
+            } else {
+                info!("GPU mining disabled, using CPU mining");
+                None
+            };
+
             let mut mining_attempts = tokio::task::JoinSet::<(
                 SerfThread<SaveableCheckpoint>,
                 u64,
                 Result<NounSlab, CrownError>,
             )>::new();
+            
+            // GPU mining tasks
+            let mut gpu_mining_attempts = tokio::task::JoinSet::<GpuMiningResult>::new();
+            
             let hot_state = zkvm_jetpack::hot::produce_prover_hot_state();
             let test_jets_str = std::env::var("NOCK_TEST_JETS").unwrap_or_default();
             let test_jets = nockapp::kernel::boot::parse_test_jets(test_jets_str.as_str());
 
             let mining_data: Mutex<Option<MiningData>> = Mutex::new(None);
             let mut cancel_tokens: Vec<NockCancelToken> = Vec::<NockCancelToken>::new();
+            let mut gpu_nonce_counter: u64 = 0;
 
             loop {
                 tokio::select! {
+                        // Handle GPU mining results
+                        gpu_result = gpu_mining_attempts.join_next(), if !gpu_mining_attempts.is_empty() => {
+                            let gpu_result = gpu_result.expect("GPU mining task failed");
+                            let result = gpu_result.expect("GPU mining result failed");
+                            
+                            if result.found_solution {
+                                info!("GPU found block! Processed {} nonces", result.processed_count);
+                                
+                                // Convert GPU result to noun format and poke main kernel
+                                let mut poke_slab = NounSlab::new();
+                                
+                                // Create nonce noun from GPU result
+                                let mut nonce_cell = Atom::from_value(&mut poke_slab, result.nonce[0])
+                                    .expect("Failed to create nonce atom")
+                                    .as_noun();
+                                    
+                                for i in 1..5 {
+                                    let nonce_atom = Atom::from_value(&mut poke_slab, result.nonce[i])
+                                        .expect("Failed to create nonce atom")
+                                        .as_noun();
+                                    nonce_cell = T(&mut poke_slab, &[nonce_atom, nonce_cell]);
+                                }
+                                
+                                // Create hash noun from GPU result  
+                                let mut hash_cell = Atom::from_value(&mut poke_slab, result.hash[0])
+                                    .expect("Failed to create hash atom")
+                                    .as_noun();
+                                    
+                                for i in 1..5 {
+                                    let hash_atom = Atom::from_value(&mut poke_slab, result.hash[i])
+                                        .expect("Failed to create hash atom")
+                                        .as_noun();
+                                    hash_cell = T(&mut poke_slab, &[hash_atom, hash_cell]);
+                                }
+                                
+                                // Create the poke data: [hash, nonce]
+                                let poke_data = T(&mut poke_slab, &[hash_cell, nonce_cell]);
+                                poke_slab.set_root(poke_data);
+                                
+                                handle.poke(MiningWire::Mined.to_wire(), poke_slab).await
+                                    .expect("Could not poke nockchain with GPU mined PoW");
+                            } else {
+                                debug!("GPU batch completed, processed {} nonces", result.processed_count);
+                            }
+                            
+                            // GPU mining restart would go here
+                            start_gpu_mining_batch_if_available(gpu_miner.as_ref(), &mut gpu_nonce_counter);
+                        }
+
                         mining_result = mining_attempts.join_next(), if !mining_attempts.is_empty() => {
                             let mining_result = mining_result.expect("Mining attempt failed");
                             let (serf, id, slab_res) = mining_result.expect("Mining attempt result failed");
@@ -248,12 +336,22 @@ pub fn create_mining_driver(
                                     start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, i).await;
                                 }
                                 info!("mining threads started with {} threads", num_threads);
+                                
+                                // Start GPU mining if available
+                                start_gpu_mining_batch_if_available(gpu_miner.as_ref(), &mut gpu_nonce_counter);
                             } else {
                                 // Mining is already running so cancel all the running attemps
                                 // which are mining on the old block.
                                 debug!("restarting mining attempts with new block header.");
                                 for token in &cancel_tokens {
                                     token.cancel();
+                                }
+                                
+                                // Stop GPU mining tasks (they will restart automatically)  
+                                if let Some(gpu_miner_ref) = &gpu_miner {
+                                    gpu_miner_ref.stop();
+                                    // Clear GPU tasks - they will be restarted in the next iteration
+                                    gpu_mining_attempts.abort_all();
                                 }
                             }
                         }
@@ -352,6 +450,45 @@ async fn enable_mining(handle: &NockAppHandle, enable: bool) -> Result<PokeResul
     handle
         .poke(MiningWire::Enable.to_wire(), enable_mining_slab)
         .await
+}
+
+fn start_gpu_mining_batch_if_available(
+    _gpu_miner: Option<&Arc<GpuMiner>>,
+    _nonce_counter: &mut u64,
+) {
+    // Simplified GPU mining integration - to be implemented properly later
+    // Current issue: NounSlab is not Send/Sync safe for async contexts
+    info!("GPU mining integration disabled due to thread safety constraints");
+}
+
+fn extract_5tuple_from_noun(noun: nockvm::noun::Noun) -> [u64; 5] {
+    // Extract 5-tuple from noun format used in TIP5
+    // This is a simplified implementation - in practice you'd want more robust parsing
+    let mut result = [0u64; 5];
+    
+    if let Ok(atom) = noun.as_atom() {
+        // If it's an atom, treat as single value
+        result[0] = atom.as_u64().unwrap_or(0) % PRIME;
+        return result;
+    }
+    
+    // If it's a cell, try to extract 5 elements
+    let mut current = noun;
+    let mut index = 0;
+    
+    while current.is_cell() && index < 5 {
+        if let Ok(cell) = current.as_cell() {
+            if let Ok(head_atom) = cell.head().as_atom() {
+                result[index] = head_atom.as_u64().unwrap_or(0) % PRIME;
+            }
+            current = cell.tail();
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    
+    result
 }
 
 async fn start_mining_attempt(
