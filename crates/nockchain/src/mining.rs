@@ -232,7 +232,13 @@ pub fn create_mining_driver_with_options(
                                 &mut gpu_nonce_counter, 
                                 &mining_data, 
                                 &mut gpu_mining_attempts, 
-                                handle.clone()
+                                NockAppHandle {
+                                    io_sender: handle.io_sender.clone(),
+                                    effect_sender: handle.effect_sender.clone(),
+                                    effect_receiver: Mutex::new(handle.effect_sender.subscribe()),
+                                    metrics: handle.metrics.clone(),
+                                    exit: handle.exit.clone(),
+                                }
                             ).await;
                         }
 
@@ -247,12 +253,9 @@ pub fn create_mining_driver_with_options(
                                 // Add detailed debugging for H100 deployment
                                 if result.is_atom() {
                                     if let Ok(atom) = result.as_atom() {
-                                        if let Ok(bytes) = atom.as_bytes() {
-                                            warn!("Mining result is atom instead of cell. thread={id}, atom_bytes={:?}", 
-                                                  String::from_utf8_lossy(&bytes[..std::cmp::min(bytes.len(), 32)]));
-                                        } else {
-                                            warn!("Mining result is atom instead of cell. thread={id}, atom_size={}", atom.size());
-                                        }
+                                        let bytes = atom.as_ne_bytes();
+                                        warn!("Mining result is atom instead of cell. thread={id}, atom_bytes={:?}", 
+                                              String::from_utf8_lossy(&bytes[..std::cmp::min(bytes.len(), 32)]));
                                     } else {
                                         warn!("Mining result is atom but cannot read. thread={id}");
                                     }
@@ -424,7 +427,13 @@ pub fn create_mining_driver_with_options(
                                     &mut gpu_nonce_counter, 
                                     &mining_data, 
                                     &mut gpu_mining_attempts, 
-                                    handle.clone()
+                                    NockAppHandle {
+                                    io_sender: handle.io_sender.clone(),
+                                    effect_sender: handle.effect_sender.clone(),
+                                    effect_receiver: Mutex::new(handle.effect_sender.subscribe()),
+                                    metrics: handle.metrics.clone(),
+                                    exit: handle.exit.clone(),
+                                }
                                 ).await;
                             } else {
                                 // Mining is already running so cancel all the running attemps

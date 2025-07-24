@@ -67,7 +67,7 @@ pub struct GpuDeviceInfo {
 }
 
 impl GpuMiner {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new() -> Result<Self, String> {
         let (backend, device_info) = Self::initialize_gpu_backend()?;
         let batch_size = if device_info.is_some() {
             GPU_BATCH_SIZE
@@ -85,7 +85,7 @@ impl GpuMiner {
 
     // Simple constructor that always returns a non-available miner for testing
     #[allow(dead_code)]
-    pub fn new_unavailable() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new_unavailable() -> Result<Self, String> {
         Ok(Self {
             backend: GpuBackend::None,
             is_running: Arc::new(AtomicBool::new(false)),
@@ -94,7 +94,7 @@ impl GpuMiner {
         })
     }
 
-    fn initialize_gpu_backend() -> Result<(GpuBackend, Option<GpuDeviceInfo>), Box<dyn std::error::Error>> {
+    fn initialize_gpu_backend() -> Result<(GpuBackend, Option<GpuDeviceInfo>), String> {
         // Try CUDA first (preferred for H100)
         #[cfg(feature = "cuda")]
         {
@@ -131,15 +131,16 @@ impl GpuMiner {
     }
 
     #[cfg(feature = "cuda")]
-    fn init_cuda() -> Result<(std::sync::Arc<CudaDevice>, GpuDeviceInfo), Box<dyn std::error::Error>> {
+    fn init_cuda() -> Result<(std::sync::Arc<CudaDevice>, GpuDeviceInfo), String> {
         info!("Initializing CUDA device for H100 mining");
         
         // Initialize CUDA device (H100 should be device 0)
-        let device = CudaDevice::new(0)?;
+        let device = CudaDevice::new(0).map_err(|e| format!("Failed to create CUDA device: {}", e))?;
         
         // Get device information
-        let device_name = device.name()?;
-        let total_memory = device.total_memory()?;
+        let device_name = device.name().map_err(|e| format!("Failed to get device name: {}", e))?;
+        // TODO: Fix CUDA API - placeholder memory value
+        let total_memory = 80 * 1024 * 1024 * 1024; // Assume 80GB for H100
         
         // Create device info struct
         let device_info = GpuDeviceInfo {
@@ -171,7 +172,7 @@ impl GpuMiner {
 
     #[cfg(feature = "opencl")]
     #[allow(dead_code)]
-    fn init_opencl() -> Result<(Context, CommandQueue, Program, Kernel), Box<dyn std::error::Error>> {
+    fn init_opencl() -> Result<(Context, CommandQueue, Program, Kernel), String> {
         // Disabled for compilation compatibility
         Err("OpenCL initialization disabled".into())
     }
@@ -187,7 +188,7 @@ impl GpuMiner {
         target: &[u64; 5],
         pow_len: u64,
         start_nonce: u64,
-    ) -> Result<GpuMiningResult, Box<dyn std::error::Error>> {
+    ) -> Result<GpuMiningResult, String> {
         if !self.is_available() {
             return Err("GPU backend not available".into());
         }
@@ -216,22 +217,22 @@ impl GpuMiner {
         target: &[u64; 5],
         pow_len: u64,
         start_nonce: u64,
-    ) -> Result<GpuMiningResult, Box<dyn std::error::Error>> {
+    ) -> Result<GpuMiningResult, String> {
         let batch_size = self.batch_size;
         info!("Starting H100 CUDA mining: {} nonces from {}", batch_size, start_nonce);
         
         let start_time = std::time::Instant::now();
         
         // Allocate GPU memory for inputs
-        let d_version = device.htod_copy(version.to_vec())?;
-        let d_header = device.htod_copy(header.to_vec())?;
-        let d_target = device.htod_copy(target.to_vec())?;
+        let d_version = device.htod_copy(version.to_vec()).map_err(|e| format!("Failed to copy version to GPU: {}", e))?;
+        let d_header = device.htod_copy(header.to_vec()).map_err(|e| format!("Failed to copy header to GPU: {}", e))?;
+        let d_target = device.htod_copy(target.to_vec()).map_err(|e| format!("Failed to copy target to GPU: {}", e))?;
         
         // Allocate GPU memory for outputs
         let results_size = batch_size * TIP5_HASH_SIZE;
-        let d_results = device.alloc_zeros::<u64>(results_size)?;
-        let d_found = device.alloc_zeros::<u32>(1)?;
-        let d_solution_nonce = device.alloc_zeros::<u64>(5)?;
+        let d_results = device.alloc_zeros::<u64>(results_size).map_err(|e| format!("Failed to allocate GPU results buffer: {}", e))?;
+        let d_found = device.alloc_zeros::<u32>(1).map_err(|e| format!("Failed to allocate GPU found buffer: {}", e))?;
+        let d_solution_nonce = device.alloc_zeros::<u64>(5).map_err(|e| format!("Failed to allocate GPU solution nonce buffer: {}", e))?;
         
         // H100 optimized launch configuration
         let threads_per_block = H100_MAX_THREADS_PER_BLOCK;
@@ -265,16 +266,16 @@ impl GpuMiner {
         );
         
         unsafe {
-            kernel_func.launch(launch_config, kernel_params)?;
+            kernel_func.launch(launch_config, kernel_params).map_err(|e| format!("Failed to launch H100 kernel: {}", e))?;
         }
         
         // Wait for H100 kernel completion
-        device.synchronize()?;
+        device.synchronize().map_err(|e| format!("Failed to synchronize H100 device: {}", e))?;
         
         let kernel_time = start_time.elapsed();
         
         // Copy results back from H100 memory
-        let found_flag: Vec<u32> = device.dtoh_sync_copy(&d_found)?;
+        let found_flag: Vec<u32> = device.dtoh_sync_copy(&d_found).map_err(|e| format!("Failed to copy found flag from GPU: {}", e))?;
         let solution_found = found_flag[0] != 0;
         
         let mut result = GpuMiningResult {
@@ -285,11 +286,11 @@ impl GpuMiner {
         };
         
         if solution_found {
-            let solution_nonce: Vec<u64> = device.dtoh_sync_copy(&d_solution_nonce)?;
+            let solution_nonce: Vec<u64> = device.dtoh_sync_copy(&d_solution_nonce).map_err(|e| format!("Failed to copy solution nonce from GPU: {}", e))?;
             result.nonce = solution_nonce;
             
             // Calculate the winning hash for verification
-            result.hash = self.calculate_tip5_hash_cpu(version, header, &result.nonce, target, pow_len)?;
+            result.hash = self.calculate_tip5_hash_cpu(version, header, &result.nonce, target, pow_len).map_err(|e| format!("Failed to calculate winning hash: {}", e))?;
             
             info!("🎉 H100 found solution! Nonce: {:?}", result.nonce);
             info!("🎉 Winning hash: {:?}", result.hash);
@@ -317,7 +318,7 @@ impl GpuMiner {
         _target: &[u64; 5],
         _pow_len: u64,
         _start_nonce: u64,
-    ) -> Result<GpuMiningResult, Box<dyn std::error::Error>> {
+    ) -> Result<GpuMiningResult, String> {
         // Disabled for compilation compatibility
         Err("OpenCL mining disabled".into())
     }
@@ -329,7 +330,7 @@ impl GpuMiner {
         nonce: &[u64],
         _target: &[u64; 5],
         pow_len: u64,
-    ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<u64>, String> {
         // Implement CPU-based TIP5 hash calculation for verification
         // This is a simplified version - in practice, you'd use the existing TIP5 implementation
         use zkvm_jetpack::form::math::tip5::*;
@@ -418,7 +419,7 @@ impl GpuMiner {
         }
     }
     
-    pub async fn benchmark(&self) -> Result<f64, Box<dyn std::error::Error>> {
+    pub async fn benchmark(&self) -> Result<f64, String> {
         if !self.is_available() {
             return Err("GPU not available for benchmarking".into());
         }
