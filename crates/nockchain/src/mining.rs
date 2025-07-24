@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 use zkvm_jetpack::form::PRIME;
 use zkvm_jetpack::noun::noun_ext::NounExt as OtherNounExt;
-use crate::gpu_mining::{GpuMiner, GpuMiningResult};
+use crate::gpu_mining::{GpuMiner, GpuMiningResult, GPU_BATCH_SIZE};
 
 pub enum MiningWire {
     Mined,
@@ -226,8 +226,14 @@ pub fn create_mining_driver_with_options(
                                 debug!("GPU batch completed, processed {} nonces", result.processed_count);
                             }
                             
-                            // GPU mining restart would go here
-                            start_gpu_mining_batch_if_available(gpu_requested, &mut gpu_nonce_counter);
+                            // Restart GPU mining batch if requested
+                            start_gpu_mining_batch_if_available(
+                                gpu_requested, 
+                                &mut gpu_nonce_counter, 
+                                &mining_data, 
+                                &mut gpu_mining_attempts, 
+                                handle.clone()
+                            ).await;
                         }
 
                         mining_result = mining_attempts.join_next(), if !mining_attempts.is_empty() => {
@@ -413,7 +419,13 @@ pub fn create_mining_driver_with_options(
                                 info!("mining threads started with {} threads", num_threads);
                                 
                                 // Start GPU mining if available
-                                start_gpu_mining_batch_if_available(gpu_requested, &mut gpu_nonce_counter);
+                                start_gpu_mining_batch_if_available(
+                                    gpu_requested, 
+                                    &mut gpu_nonce_counter, 
+                                    &mining_data, 
+                                    &mut gpu_mining_attempts, 
+                                    handle.clone()
+                                ).await;
                             } else {
                                 // Mining is already running so cancel all the running attemps
                                 // which are mining on the old block.
@@ -526,15 +538,121 @@ async fn enable_mining(handle: &NockAppHandle, enable: bool) -> Result<PokeResul
         .await
 }
 
-fn start_gpu_mining_batch_if_available(
+async fn start_gpu_mining_batch_if_available(
     gpu_requested: bool,
-    _nonce_counter: &mut u64,
+    nonce_counter: &mut u64,
+    mining_data: &Mutex<Option<MiningData>>,
+    gpu_mining_attempts: &mut tokio::task::JoinSet<GpuMiningResult>,
+    handle: NockAppHandle,
 ) {
-    if gpu_requested {
-        // Simplified GPU mining integration - to be implemented properly later
-        // Current issue: NounSlab is not Send/Sync safe for async contexts
-        info!("GPU mining integration disabled due to thread safety constraints");
+    if !gpu_requested {
+        return;
     }
+    
+    let mining_data_guard = mining_data.lock().await;
+    let Some(ref mining_data_ref) = *mining_data_guard else {
+        debug!("No mining data available for GPU mining");
+        return;
+    };
+    
+    // Extract mining parameters for GPU
+    let version = extract_5tuple_from_noun(unsafe { *mining_data_ref.version.root() });
+    let header = extract_5tuple_from_noun(unsafe { *mining_data_ref.block_header.root() });
+    let target = extract_5tuple_from_noun(unsafe { *mining_data_ref.target.root() });
+    let pow_len = mining_data_ref.pow_len;
+    let start_nonce = *nonce_counter;
+    
+    // Increment nonce counter for next batch
+    *nonce_counter = nonce_counter.wrapping_add(GPU_BATCH_SIZE as u64);
+    
+    drop(mining_data_guard);
+    
+    // Clone data for the async task
+    let version_owned = version;
+    let header_owned = header;
+    let target_owned = target;
+    
+    gpu_mining_attempts.spawn(async move {
+        match GpuMiner::new() {
+            Ok(miner) => {
+                if miner.is_available() {
+                    info!("Starting H100 GPU mining batch with {} nonces", miner.get_batch_size());
+                    
+                    match miner.mine_batch(&version_owned, &header_owned, &target_owned, pow_len, start_nonce).await {
+                        Ok(result) => {
+                            if result.found_solution {
+                                info!("🎉 H100 GPU found solution!");
+                                
+                                // Create poke data for the solution
+                                let mut poke_slab = NounSlab::new();
+                                
+                                // Convert nonce to noun format
+                                let mut nonce_cell = Atom::from_value(&mut poke_slab, result.nonce[0])
+                                    .expect("Failed to create nonce atom")
+                                    .as_noun();
+                                
+                                for i in 1..5 {
+                                    let nonce_atom = Atom::from_value(&mut poke_slab, result.nonce[i])
+                                        .expect("Failed to create nonce atom")
+                                        .as_noun();
+                                    nonce_cell = T(&mut poke_slab, &[nonce_atom, nonce_cell]);
+                                }
+                                
+                                // Convert hash to noun format
+                                let mut hash_cell = Atom::from_value(&mut poke_slab, result.hash[0])
+                                    .expect("Failed to create hash atom")
+                                    .as_noun();
+                                
+                                for i in 1..5 {
+                                    let hash_atom = Atom::from_value(&mut poke_slab, result.hash[i])
+                                        .expect("Failed to create hash atom")
+                                        .as_noun();
+                                    hash_cell = T(&mut poke_slab, &[hash_atom, hash_cell]);
+                                }
+                                
+                                // Create poke data: [hash, nonce]
+                                let poke_data = T(&mut poke_slab, &[hash_cell, nonce_cell]);
+                                poke_slab.set_root(poke_data);
+                                
+                                // Poke the main kernel with the solution
+                                if let Err(e) = handle.poke(MiningWire::Mined.to_wire(), poke_slab).await {
+                                    warn!("Failed to poke H100 mining solution: {}", e);
+                                }
+                            }
+                            
+                            result
+                        }
+                        Err(e) => {
+                            warn!("H100 GPU mining batch failed: {}", e);
+                            GpuMiningResult {
+                                found_solution: false,
+                                hash: Vec::new(),
+                                nonce: Vec::new(),
+                                processed_count: 0,
+                            }
+                        }
+                    }
+                } else {
+                    debug!("GPU miner not available");
+                    GpuMiningResult {
+                        found_solution: false,
+                        hash: Vec::new(),
+                        nonce: Vec::new(),
+                        processed_count: 0,
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to create GPU miner: {}", e);
+                GpuMiningResult {
+                    found_solution: false,
+                    hash: Vec::new(),
+                    nonce: Vec::new(),
+                    processed_count: 0,
+                }
+            }
+        }
+    });
 }
 
 fn extract_5tuple_from_noun(noun: nockvm::noun::Noun) -> [u64; 5] {

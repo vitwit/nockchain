@@ -1,11 +1,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{warn, info};
-use rand::Rng;
 use zkvm_jetpack::form::PRIME;
 
 #[cfg(feature = "cuda")]
-use cudarc::driver::CudaDevice;
+use cudarc::driver::{CudaDevice, LaunchAsync, LaunchConfig};
 #[cfg(feature = "cuda")]
 use cudarc::nvrtc::compile_ptx;
 
@@ -24,8 +23,12 @@ use opencl3::command_queue::CommandQueue;
 #[cfg(feature = "opencl")]
 use opencl3::types::CL_BLOCKING;
 
-const GPU_BATCH_SIZE: usize = 1024 * 1024; // Process 1M nonces per batch
-const MAX_GPU_THREADS: u32 = 65536;
+// H100 optimized constants
+pub const GPU_BATCH_SIZE: usize = 8 * 1024 * 1024; // Process 8M nonces per batch for H100
+const H100_MAX_THREADS_PER_BLOCK: u32 = 1024; // H100 optimal block size
+const H100_MAX_BLOCKS: u32 = 65536; // Maximum blocks for H100
+const H100_SM_COUNT: u32 = 132; // H100 has 132 SMs
+const TIP5_HASH_SIZE: usize = 5; // TIP5 produces 5 u64 elements
 
 pub struct GpuMiningResult {
     pub found_solution: bool,
@@ -51,15 +54,32 @@ pub struct GpuMiner {
     backend: GpuBackend,
     is_running: Arc<AtomicBool>,
     batch_size: usize,
+    device_info: Option<GpuDeviceInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GpuDeviceInfo {
+    pub name: String,
+    pub compute_capability: (u32, u32),
+    pub memory_gb: u64,
+    pub sm_count: u32,
+    pub max_threads_per_block: u32,
 }
 
 impl GpuMiner {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let backend = Self::initialize_gpu_backend()?;
+        let (backend, device_info) = Self::initialize_gpu_backend()?;
+        let batch_size = if device_info.is_some() {
+            GPU_BATCH_SIZE
+        } else {
+            1024 // Fallback batch size
+        };
+        
         Ok(Self {
             backend,
             is_running: Arc::new(AtomicBool::new(false)),
-            batch_size: GPU_BATCH_SIZE,
+            batch_size,
+            device_info,
         })
     }
 
@@ -69,18 +89,22 @@ impl GpuMiner {
         Ok(Self {
             backend: GpuBackend::None,
             is_running: Arc::new(AtomicBool::new(false)),
-            batch_size: GPU_BATCH_SIZE,
+            batch_size: 1024,
+            device_info: None,
         })
     }
 
-    fn initialize_gpu_backend() -> Result<GpuBackend, Box<dyn std::error::Error>> {
+    fn initialize_gpu_backend() -> Result<(GpuBackend, Option<GpuDeviceInfo>), Box<dyn std::error::Error>> {
         // Try CUDA first (preferred for H100)
         #[cfg(feature = "cuda")]
         {
             match Self::init_cuda() {
-                Ok(device) => {
-                    info!("CUDA GPU backend initialized successfully");
-                    return Ok(GpuBackend::Cuda(device));
+                Ok((device, device_info)) => {
+                    info!("CUDA GPU backend initialized successfully: {}", device_info.name);
+                    info!("Device specs: {} GB memory, {} SMs, compute {}.{}", 
+                          device_info.memory_gb, device_info.sm_count, 
+                          device_info.compute_capability.0, device_info.compute_capability.1);
+                    return Ok((GpuBackend::Cuda(device), Some(device_info)));
                 }
                 Err(e) => {
                     warn!("Failed to initialize CUDA backend: {}", e);
@@ -94,7 +118,7 @@ impl GpuMiner {
             match Self::init_opencl() {
                 Ok((context, queue, program, kernel)) => {
                     info!("OpenCL GPU backend initialized successfully");
-                    return Ok(GpuBackend::OpenCL { context, queue, program, kernel });
+                    return Ok((GpuBackend::OpenCL { context, queue, program, kernel }, None));
                 }
                 Err(e) => {
                     warn!("Failed to initialize OpenCL backend: {}", e);
@@ -103,43 +127,46 @@ impl GpuMiner {
         }
         
         warn!("No GPU backend available - using CPU mining");
-        Ok(GpuBackend::None)
+        Ok((GpuBackend::None, None))
     }
 
     #[cfg(feature = "cuda")]
-    fn init_cuda() -> Result<std::sync::Arc<CudaDevice>, Box<dyn std::error::Error>> {
+    fn init_cuda() -> Result<(std::sync::Arc<CudaDevice>, GpuDeviceInfo), Box<dyn std::error::Error>> {
         info!("Initializing CUDA device for H100 mining");
         
         // Initialize CUDA device (H100 should be device 0)
         let device = CudaDevice::new(0)?;
         
-        info!("CUDA device initialized successfully");
-        info!("Device name: {:?}", device.name());
+        // Get device information
+        let device_name = device.name()?;
+        let total_memory = device.total_memory()?;
         
-        // For H100, we want to compile and load the mining kernel
-        // The kernel source is embedded in the binary
+        // Create device info struct
+        let device_info = GpuDeviceInfo {
+            name: device_name.clone(),
+            compute_capability: (9, 0), // H100 is compute capability 9.0
+            memory_gb: total_memory / (1024 * 1024 * 1024),
+            sm_count: H100_SM_COUNT,
+            max_threads_per_block: H100_MAX_THREADS_PER_BLOCK,
+        };
+        
+        info!("CUDA device initialized: {}", device_name);
+        info!("Memory: {} GB, SMs: {}, Max threads/block: {}", 
+              device_info.memory_gb, device_info.sm_count, device_info.max_threads_per_block);
+        
+        // Compile and load the mining kernel
         let ptx_src = include_str!("kernels/tip5_mining.cu");
         
-        match compile_ptx(ptx_src) {
-            Ok(ptx) => {
-                match device.load_ptx(ptx, "tip5_mining", &["tip5_mine_batch"]) {
-                    Ok(_) => {
-                        info!("H100 TIP5 mining kernel loaded successfully");
-                    }
-                    Err(e) => {
-                        warn!("Failed to load H100 kernel: {}, using CPU fallback", e);
-                        // Don't fail initialization, just log the issue
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to compile H100 kernel: {}, using CPU fallback", e);
-                // Don't fail initialization, just log the issue
-            }
-        }
-        
+        let ptx = compile_ptx(ptx_src)
+            .map_err(|e| format!("Failed to compile H100 kernel: {}", e))?;
+            
+        device.load_ptx(ptx, "tip5_mining", &["tip5_mine_batch"])
+            .map_err(|e| format!("Failed to load H100 kernel: {}", e))?;
+            
+        info!("H100 TIP5 mining kernel loaded successfully");
         info!("H100 CUDA backend ready for high-performance mining");
-        Ok(device)
+        
+        Ok((device, device_info))
     }
 
     #[cfg(feature = "opencl")]
@@ -190,91 +217,90 @@ impl GpuMiner {
         pow_len: u64,
         start_nonce: u64,
     ) -> Result<GpuMiningResult, Box<dyn std::error::Error>> {
-        info!("Starting CUDA mining batch on H100 with {} nonces", self.batch_size);
-        
-        // For H100 deployment, we need to use the actual cudarc API
-        // The current API might be different, so let's implement a working version
-        
-        // Create input data vectors
-        let version_data: Vec<u64> = version.iter().cloned().collect();
-        let header_data: Vec<u64> = header.iter().cloned().collect();
-        let target_data: Vec<u64> = target.iter().cloned().collect();
-        
-        // Prepare GPU memory allocations
         let batch_size = self.batch_size;
+        info!("Starting H100 CUDA mining: {} nonces from {}", batch_size, start_nonce);
         
-        // For now, simulate H100 mining with CPU calculation but optimized parameters
-        // This ensures the framework works while we resolve the exact cudarc API
+        let start_time = std::time::Instant::now();
         
-        info!("H100 GPU simulation: processing {} nonces starting from {}", batch_size, start_nonce);
+        // Allocate GPU memory for inputs
+        let d_version = device.htod_copy(version.to_vec())?;
+        let d_header = device.htod_copy(header.to_vec())?;
+        let d_target = device.htod_copy(target.to_vec())?;
         
-        // Simulate GPU parallel processing
-        let mut best_hash = vec![u64::MAX; 5];
-        let mut solution_found = false;
-        let mut winning_nonce = vec![0u64; 5];
+        // Allocate GPU memory for outputs
+        let results_size = batch_size * TIP5_HASH_SIZE;
+        let d_results = device.alloc_zeros::<u64>(results_size)?;
+        let d_found = device.alloc_zeros::<u32>(1)?;
+        let d_solution_nonce = device.alloc_zeros::<u64>(5)?;
         
-        // Process nonces in H100-sized batches (simulate massive parallelism)
-        for i in 0..std::cmp::min(batch_size, 1024) { // Limit for simulation
-            let nonce_base = start_nonce + i as u64;
-            let current_nonce = [
-                nonce_base % zkvm_jetpack::form::PRIME,
-                (nonce_base + 1) % zkvm_jetpack::form::PRIME,
-                (nonce_base + 2) % zkvm_jetpack::form::PRIME,
-                (nonce_base + 3) % zkvm_jetpack::form::PRIME,
-                (nonce_base + 4) % zkvm_jetpack::form::PRIME,
-            ];
-            
-            // Calculate hash using CPU implementation (will be GPU on H100)
-            match self.calculate_tip5_hash_cpu(version, header, &current_nonce, target, pow_len) {
-                Ok(hash) => {
-                    // Check if this is better than current best
-                    let mut is_better = false;
-                    for j in 0..5 {
-                        if hash[j] < best_hash[j] {
-                            is_better = true;
-                            break;
-                        } else if hash[j] > best_hash[j] {
-                            break;
-                        }
-                    }
-                    
-                    if is_better {
-                        best_hash = hash.clone();
-                        winning_nonce = current_nonce.to_vec();
-                        
-                        // Check if meets target
-                        let mut meets_target = true;
-                        for j in 0..5 {
-                            if hash[j] > target[j] {
-                                meets_target = false;
-                                break;
-                            } else if hash[j] < target[j] {
-                                break;
-                            }
-                        }
-                        
-                        if meets_target {
-                            solution_found = true;
-                            info!("H100 found valid solution! Hash: {:?}", hash);
-                            break;
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Hash calculation error in H100 simulation: {}", e);
-                }
-            }
+        // H100 optimized launch configuration
+        let threads_per_block = H100_MAX_THREADS_PER_BLOCK;
+        let blocks_needed = (batch_size as u32 + threads_per_block - 1) / threads_per_block;
+        let blocks_per_grid = std::cmp::min(blocks_needed, H100_MAX_BLOCKS);
+        
+        let launch_config = LaunchConfig {
+            grid_dim: (blocks_per_grid, 1, 1),
+            block_dim: (threads_per_block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        info!("H100 launch config: {} blocks × {} threads = {} total threads", 
+              blocks_per_grid, threads_per_block, blocks_per_grid * threads_per_block);
+        
+        // Get the compiled kernel function
+        let kernel_func = device.get_func("tip5_mining", "tip5_mine_batch")
+            .ok_or("TIP5 mining kernel not found - ensure kernel compilation succeeded")?;
+        
+        // Launch the kernel on H100
+        let kernel_params = (
+            &d_version,
+            &d_header,
+            &d_target,
+            pow_len,
+            start_nonce,
+            batch_size as u32,
+            &d_results,
+            &d_found,
+            &d_solution_nonce,
+        );
+        
+        unsafe {
+            kernel_func.launch(launch_config, kernel_params)?;
         }
         
-        let result = GpuMiningResult {
+        // Wait for H100 kernel completion
+        device.synchronize()?;
+        
+        let kernel_time = start_time.elapsed();
+        
+        // Copy results back from H100 memory
+        let found_flag: Vec<u32> = device.dtoh_sync_copy(&d_found)?;
+        let solution_found = found_flag[0] != 0;
+        
+        let mut result = GpuMiningResult {
             found_solution: solution_found,
-            hash: if solution_found { best_hash } else { Vec::new() },
-            nonce: if solution_found { winning_nonce } else { Vec::new() },
+            hash: Vec::new(),
+            nonce: Vec::new(),
             processed_count: batch_size as u64,
         };
         
-        info!("H100 batch complete. Solution found: {}, processed: {} nonces", 
-              result.found_solution, result.processed_count);
+        if solution_found {
+            let solution_nonce: Vec<u64> = device.dtoh_sync_copy(&d_solution_nonce)?;
+            result.nonce = solution_nonce;
+            
+            // Calculate the winning hash for verification
+            result.hash = self.calculate_tip5_hash_cpu(version, header, &result.nonce, target, pow_len)?;
+            
+            info!("🎉 H100 found solution! Nonce: {:?}", result.nonce);
+            info!("🎉 Winning hash: {:?}", result.hash);
+        }
+        
+        let total_time = start_time.elapsed();
+        let hash_rate = batch_size as f64 / total_time.as_secs_f64();
+        
+        info!("H100 mining complete: {} nonces in {:.2}ms (kernel: {:.2}ms)", 
+              batch_size, total_time.as_millis(), kernel_time.as_millis());
+        info!("H100 hash rate: {:.2} MH/s", hash_rate / 1_000_000.0);
         
         Ok(result)
     }
@@ -363,29 +389,117 @@ impl GpuMiner {
     pub fn stop(&self) {
         self.is_running.store(false, Ordering::Relaxed);
     }
+    
+    pub fn get_device_info(&self) -> Option<&GpuDeviceInfo> {
+        self.device_info.as_ref()
+    }
+    
+    pub fn get_batch_size(&self) -> usize {
+        self.batch_size
+    }
+    
+    pub fn set_batch_size(&mut self, batch_size: usize) {
+        // Validate batch size for H100
+        let max_batch = H100_MAX_BLOCKS as usize * H100_MAX_THREADS_PER_BLOCK as usize;
+        self.batch_size = std::cmp::min(batch_size, max_batch);
+        info!("Set H100 batch size to: {}", self.batch_size);
+    }
+    
+    pub fn get_optimal_batch_size(&self) -> usize {
+        if let Some(device_info) = &self.device_info {
+            // For H100, use memory-based calculation
+            let memory_per_nonce = 8 * TIP5_HASH_SIZE + 8 * 5; // hash + nonce storage
+            let available_memory = (device_info.memory_gb * 1024 * 1024 * 1024) / 2; // Use 50% of memory
+            let max_nonces = available_memory / memory_per_nonce as u64;
+            
+            std::cmp::min(max_nonces as usize, GPU_BATCH_SIZE)
+        } else {
+            1024 // Fallback for CPU
+        }
+    }
+    
+    pub async fn benchmark(&self) -> Result<f64, Box<dyn std::error::Error>> {
+        if !self.is_available() {
+            return Err("GPU not available for benchmarking".into());
+        }
+        
+        info!("Starting H100 mining benchmark...");
+        
+        // Use sample data for benchmarking
+        let version = [1u64, 2, 3, 4, 5];
+        let header = [6u64, 7, 8, 9, 10];
+        let target = [u64::MAX; 5]; // Very high target so we don't find solutions
+        let pow_len = 64;
+        let start_nonce = 0;
+        
+        let benchmark_batch_size = std::cmp::min(self.batch_size, 1024 * 1024); // 1M nonces for benchmark
+        // Use smaller batch for benchmark
+        
+        // Temporarily set smaller batch size for benchmark
+        let miner = Self {
+            backend: match &self.backend {
+                #[cfg(feature = "cuda")]
+                GpuBackend::Cuda(device) => GpuBackend::Cuda(device.clone()),
+                #[cfg(feature = "opencl")]
+                GpuBackend::OpenCL { .. } => return Err("OpenCL benchmarking not implemented".into()),
+                GpuBackend::None => return Err("No GPU backend for benchmarking".into()),
+            },
+            is_running: Arc::new(AtomicBool::new(false)),
+            batch_size: benchmark_batch_size,
+            device_info: self.device_info.clone(),
+        };
+        
+        let start_time = std::time::Instant::now();
+        let result = miner.mine_batch(&version, &header, &target, pow_len, start_nonce).await?;
+        let elapsed = start_time.elapsed();
+        
+        let hash_rate = result.processed_count as f64 / elapsed.as_secs_f64();
+        
+        info!("H100 benchmark complete: {:.2} MH/s ({} nonces in {:.2}ms)", 
+              hash_rate / 1_000_000.0, result.processed_count, elapsed.as_millis());
+        
+        Ok(hash_rate)
+    }
 }
 
+/// Generate optimized nonce batch for H100 GPU mining
 pub fn create_gpu_nonce_batch(start_nonce: u64, batch_size: usize) -> Vec<Vec<u64>> {
     let mut nonces = Vec::with_capacity(batch_size);
-    let mut rng = rand::thread_rng();
     
+    // Use deterministic nonce generation for better GPU performance
+    // This matches the kernel's nonce generation algorithm
     for i in 0..batch_size {
-        let mut nonce = Vec::with_capacity(5);
         let base_nonce = start_nonce.wrapping_add(i as u64);
         
-        // Generate 5-element nonce tuple
-        for j in 0..5 {
-            let nonce_val = if j == 0 {
-                base_nonce % PRIME
-            } else {
-                rng.gen::<u64>() % PRIME
-            };
-            nonce.push(nonce_val);
-        }
+        // Generate 5-element nonce tuple using same algorithm as CUDA kernel
+        let nonce = vec![
+            base_nonce % PRIME,
+            (base_nonce.wrapping_mul(0x9e3779b97f4a7c15u64)) % PRIME,
+            (base_nonce.wrapping_mul(0x85ebca6b15c44e5du64)) % PRIME,
+            (base_nonce.wrapping_mul(0x635d2daa5dc32e17u64)) % PRIME,
+            (base_nonce.wrapping_mul(0xa4093822299f31d0u64)) % PRIME,
+        ];
+        
         nonces.push(nonce);
     }
     
     nonces
+}
+
+/// Validate nonce format for GPU mining
+pub fn validate_nonce(nonce: &[u64]) -> bool {
+    nonce.len() == 5 && nonce.iter().all(|&n| n < PRIME)
+}
+
+/// Calculate theoretical hash rate for given hardware
+pub fn calculate_theoretical_hashrate(sm_count: u32, base_clock_mhz: u32, threads_per_sm: u32) -> f64 {
+    let total_cores = sm_count * threads_per_sm;
+    let clock_hz = base_clock_mhz as f64 * 1_000_000.0;
+    
+    // Estimate cycles per hash (this would need profiling to be accurate)
+    let cycles_per_hash = 100.0; // Conservative estimate for TIP5
+    
+    (total_cores as f64 * clock_hz) / cycles_per_hash
 }
 
 #[cfg(test)]
