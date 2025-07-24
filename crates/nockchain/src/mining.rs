@@ -140,26 +140,25 @@ pub fn create_mining_driver_with_options(
 
             info!("Starting mining driver with {} threads", num_threads);
 
-            // Check if GPU mining was requested (actual GPU miner will be created per-thread to avoid Send issues)
+            // Check if GPU mining was requested and initialize H100 CUDA backend
             let gpu_requested = if use_gpu {
-                // Use unavailable version for now to avoid compilation issues with missing GPU backends
-                match GpuMiner::new_unavailable() {
+                match GpuMiner::new() {
                     Ok(miner) => {
                         if miner.is_available() {
-                            info!("GPU mining enabled");
+                            info!("H100 GPU mining enabled successfully");
                             true
                         } else {
-                            info!("GPU mining framework loaded but no GPU backend available, using CPU mining");
+                            info!("GPU mining framework loaded but no H100 backend available, falling back to CPU mining");
                             false
                         }
                     }
                     Err(e) => {
-                        warn!("Failed to initialize GPU miner: {}, using CPU mining", e);
+                        warn!("Failed to initialize H100 GPU miner: {}, falling back to CPU mining", e);
                         false
                     }
                 }
             } else {
-                info!("GPU mining disabled, using CPU mining");
+                info!("GPU mining disabled, using CPU mining only");
                 false
             };
 
@@ -239,8 +238,48 @@ pub fn create_mining_driver_with_options(
                             
                             // Check if result is a cell - if not, it might be an error or unexpected format
                             if !result.is_cell() {
-                                warn!("Mining result is not a cell, restarting mining attempt. thread={id}");
-                                start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, id).await;
+                                // Add detailed debugging for H100 deployment
+                                if result.is_atom() {
+                                    if let Ok(atom) = result.as_atom() {
+                                        if let Ok(bytes) = atom.as_bytes() {
+                                            warn!("Mining result is atom instead of cell. thread={id}, atom_bytes={:?}", 
+                                                  String::from_utf8_lossy(&bytes[..std::cmp::min(bytes.len(), 32)]));
+                                        } else {
+                                            warn!("Mining result is atom instead of cell. thread={id}, atom_size={}", atom.size());
+                                        }
+                                    } else {
+                                        warn!("Mining result is atom but cannot read. thread={id}");
+                                    }
+                                } else {
+                                    warn!("Mining result is neither cell nor atom. thread={id}");
+                                }
+                                
+                                // For H100 deployment, try restarting with a fresh serf if we keep getting bad results
+                                let mut mining_data_guard = mining_data.lock().await;
+                                if let Some(ref mining_data_ref) = *mining_data_guard {
+                                    warn!("Restarting mining thread {} due to invalid result format", id);
+                                    
+                                    // Create a fresh serf for this thread to avoid persistent issues
+                                    let kernel = Vec::from(KERNEL);
+                                    match SerfThread::<SaveableCheckpoint>::new(
+                                        kernel,
+                                        None,
+                                        hot_state.clone(),
+                                        NOCK_STACK_SIZE_TINY,
+                                        test_jets.clone(),
+                                        false,
+                                    ).await {
+                                        Ok(fresh_serf) => {
+                                            start_mining_attempt(fresh_serf, mining_data_guard, &mut mining_attempts, None, id).await;
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to create fresh serf for thread {}: {}", id, e);
+                                            start_mining_attempt(serf, mining_data_guard, &mut mining_attempts, None, id).await;
+                                        }
+                                    }
+                                } else {
+                                    start_mining_attempt(serf, mining_data_guard, &mut mining_attempts, None, id).await;
+                                }
                                 continue;
                             }
                             
@@ -542,16 +581,24 @@ async fn start_mining_attempt(
     let nonce = nonce.unwrap_or_else(|| {
         let mut rng = rand::thread_rng();
         let mut nonce_slab = NounSlab::new();
-        let mut nonce_cell = Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
+        
+        // Generate more conservative nonce values to avoid kernel issues
+        let base_nonce = rng.gen::<u32>() as u64; // Use smaller values initially
+        let mut nonce_cell = Atom::from_value(&mut nonce_slab, base_nonce % PRIME)
             .expect("Failed to create nonce atom")
             .as_noun();
-        for _ in 1..5 {
-            let nonce_atom = Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
+        
+        // Create 4 more nonce elements with controlled values
+        for i in 1..5 {
+            let nonce_value = (base_nonce + i) % PRIME;
+            let nonce_atom = Atom::from_value(&mut nonce_slab, nonce_value)
                 .expect("Failed to create nonce atom")
                 .as_noun();
             nonce_cell = T(&mut nonce_slab, &[nonce_atom, nonce_cell]);
         }
+        
         nonce_slab.set_root(nonce_cell);
+        debug!("Generated nonce for thread {}: base={}", id, base_nonce);
         nonce_slab
     });
     let mining_data_ref = mining_data
@@ -565,8 +612,23 @@ async fn start_mining_attempt(
         tip5_hash_to_base58(*unsafe { nonce.root() }).expect("Failed to convert nonce to Base58"),
     );
     let poke_slab = create_poke(mining_data_ref, &nonce);
+    
+    // Add validation for H100 deployment
+    debug!("Mining poke created for thread {}, poke_root_is_cell: {}", 
+           id, unsafe { poke_slab.root().is_cell() });
+    
     mining_attempts.spawn(async move {
         let result = serf.poke(MiningWire::Candidate.to_wire(), poke_slab).await;
+        
+        // Log the result type for debugging H100 issues
+        if let Ok(ref slab) = result {
+            let root = unsafe { slab.root() };
+            debug!("Mining result for thread {}: is_cell={}, is_atom={}", 
+                   id, root.is_cell(), root.is_atom());
+        } else {
+            debug!("Mining result for thread {} was an error: {:?}", id, result);
+        }
+        
         (serf, id, result)
     });
 }
