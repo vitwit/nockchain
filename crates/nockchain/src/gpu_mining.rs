@@ -11,11 +11,7 @@ use cudarc::nvrtc::compile_ptx;
 #[cfg(feature = "opencl")]
 use opencl3::context::Context;
 #[cfg(feature = "opencl")]
-use opencl3::device::Device;
-#[cfg(feature = "opencl")]
 use opencl3::kernel::Kernel;
-#[cfg(feature = "opencl")]
-use opencl3::memory::Buffer;
 #[cfg(feature = "opencl")]
 use opencl3::program::Program;
 #[cfg(feature = "opencl")]
@@ -197,8 +193,8 @@ impl GpuMiner {
                 self.mine_batch_cuda(device, &version, &header, &target, pow_len, start_nonce).await
             }
             #[cfg(feature = "opencl")]
-            GpuBackend::OpenCL { context, queue, kernel, .. } => {
-                self.mine_batch_opencl(context, queue, kernel, &version, &header, &target, pow_len, start_nonce).await
+            GpuBackend::OpenCL { .. } => {
+                Err("OpenCL mining disabled for H100 deployment".into())
             }
             GpuBackend::None => {
                 Err("No GPU backend available".into())
@@ -304,22 +300,6 @@ impl GpuMiner {
         Ok(result)
     }
 
-    #[cfg(feature = "opencl")]
-    #[allow(dead_code)]
-    async fn mine_batch_opencl(
-        &self,
-        _context: &Context,
-        _queue: &CommandQueue,
-        _kernel: &Kernel,
-        _version: &[u64; 5],
-        _header: &[u64; 5],
-        _target: &[u64; 5],
-        _pow_len: u64,
-        _start_nonce: u64,
-    ) -> Result<GpuMiningResult, String> {
-        // Disabled for compilation compatibility
-        Err("OpenCL mining disabled".into())
-    }
 
     fn calculate_tip5_hash_cpu(
         &self,
