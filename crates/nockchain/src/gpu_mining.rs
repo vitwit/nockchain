@@ -190,7 +190,8 @@ impl GpuMiner {
         match &self.backend {
             #[cfg(feature = "cuda")]
             GpuBackend::Cuda(device) => {
-                self.mine_batch_cuda(device, &version, &header, &target, pow_len, start_nonce).await
+                let device_clone = device.clone();
+                self.mine_batch_cuda(&device_clone, &version, &header, &target, pow_len, start_nonce).await
             }
             #[cfg(feature = "opencl")]
             GpuBackend::OpenCL { .. } => {
@@ -204,7 +205,7 @@ impl GpuMiner {
 
     #[cfg(feature = "cuda")]
     async fn mine_batch_cuda(
-        &self,
+        self,
         device: &std::sync::Arc<CudaDevice>,
         version: &[u64; 5],
         header: &[u64; 5],
@@ -284,7 +285,7 @@ impl GpuMiner {
             result.nonce = solution_nonce;
             
             // Calculate the winning hash for verification
-            result.hash = self.calculate_tip5_hash_cpu(version, header, &result.nonce, target, pow_len).map_err(|e| format!("Failed to calculate winning hash: {}", e))?;
+            result.hash = Self::calculate_tip5_hash_cpu(version, header, &result.nonce, target, pow_len).map_err(|e| format!("Failed to calculate winning hash: {}", e))?;
             
             info!("🎉 H100 found solution! Nonce: {:?}", result.nonce);
             info!("🎉 Winning hash: {:?}", result.hash);
@@ -302,7 +303,6 @@ impl GpuMiner {
 
 
     fn calculate_tip5_hash_cpu(
-        &self,
         version: &[u64; 5],
         header: &[u64; 5],
         nonce: &[u64],
