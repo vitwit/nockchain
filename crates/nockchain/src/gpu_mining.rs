@@ -203,8 +203,8 @@ impl GpuMiner {
         let _queue = CommandQueue::create_default(&context, CL_BLOCKING.into())
             .map_err(|e| format!("Failed to create OpenCL command queue: {}", e))?;
         
-        // Load OpenCL kernel source
-        let kernel_source = include_str!("kernels/tip5_mining.cl").to_string();
+        // Load OpenCL kernel source (use simplified version for compatibility)
+        let kernel_source = include_str!("kernels/tip5_mining_simple.cl").to_string();
         
         // Test program compilation
         let program = Program::create_from_source(&context, &kernel_source)

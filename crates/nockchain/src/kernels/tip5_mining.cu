@@ -1,5 +1,15 @@
-#include <cuda_runtime.h>
-#include <cstdint>
+// Self-contained CUDA kernel - no external headers needed
+// Define basic types if not available
+#ifndef UINT32_MAX
+#define UINT32_MAX 0xffffffffU
+#endif
+
+#ifndef UINT64_MAX  
+#define UINT64_MAX 0xffffffffffffffffULL
+#endif
+
+typedef unsigned int uint32_t;
+typedef unsigned long long uint64_t;
 
 // TIP5 constants
 #define PRIME 0xffffffff00000001ULL  // Goldilocks prime
