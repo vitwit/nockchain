@@ -581,16 +581,23 @@ async fn start_gpu_mining_batch_if_available(
     let header_owned = header;
     let target_owned = target;
     
+    info!("🔄 Spawning H100 GPU mining batch: start_nonce={}, batch_size={}", start_nonce, GPU_BATCH_SIZE);
+    
     gpu_mining_attempts.spawn(async move {
+        let batch_start_time = std::time::Instant::now();
         match GpuMiner::new() {
             Ok(miner) => {
                 if miner.is_available() {
-                    info!("Starting H100 GPU mining batch with {} nonces", miner.get_batch_size());
+                    info!("🚀 H100 GPU mining batch initiated: {} nonces from start_nonce={}", miner.get_batch_size(), start_nonce);
                     
                     match miner.mine_batch(version_owned, header_owned, target_owned, pow_len, start_nonce).await {
                         Ok(result) => {
+                            let batch_duration = batch_start_time.elapsed();
+                            let hash_rate = result.processed_count as f64 / batch_duration.as_secs_f64();
+                            
                             if result.found_solution {
-                                info!("🎉 H100 GPU found solution!");
+                                info!("🎉 H100 GPU FOUND SOLUTION! batch_time={:.2}ms, processed={}, hash_rate={:.2} MH/s", 
+                                      batch_duration.as_millis(), result.processed_count, hash_rate / 1_000_000.0);
                                 
                                 // Create poke data for the solution
                                 let mut poke_slab = NounSlab::new();
@@ -632,7 +639,8 @@ async fn start_gpu_mining_batch_if_available(
                             result
                         }
                         Err(e) => {
-                            warn!("H100 GPU mining batch failed: {}", e);
+                            let batch_duration = batch_start_time.elapsed();
+                            warn!("❌ H100 GPU mining batch failed after {:.2}ms: {}", batch_duration.as_millis(), e);
                             GpuMiningResult {
                                 found_solution: false,
                                 hash: Vec::new(),
@@ -642,7 +650,7 @@ async fn start_gpu_mining_batch_if_available(
                         }
                     }
                 } else {
-                    debug!("GPU miner not available");
+                    warn!("⚠️ GPU mining requested but H100 backend not available (fallback to CPU)");
                     GpuMiningResult {
                         found_solution: false,
                         hash: Vec::new(),
@@ -652,7 +660,7 @@ async fn start_gpu_mining_batch_if_available(
                 }
             }
             Err(e) => {
-                warn!("Failed to create GPU miner: {}", e);
+                warn!("❌ Failed to initialize H100 GPU miner: {}", e);
                 GpuMiningResult {
                     found_solution: false,
                     hash: Vec::new(),
