@@ -1719,9 +1719,11 @@
   ++  do-send-tx
     |=  =cause
     ?>  ?=(%send-tx -.cause)
-    %-  (debug "send-tx: creating raw-tx")
-    ::  note that new:raw-tx calls +validate already
-    =/  raw=raw-tx:transact  (new:raw-tx:transact p.dat.cause)
+    |^  
+    =/  [dat *rest] (weld t.cause ~)
+    =/  memo  ?~  rest  ~  i.rest
+    %-  (debug (cat 5 "send-tx: memo: " (if (~= ~ memo) memo ~)))
+    =/  raw=raw-tx:transact  (new:raw-tx:transact dat)
     =/  tx-id  id.raw
     =/  nock-cause=$>(%fact cause:dumb)
       [%fact %0 %heard-tx raw]
@@ -1993,11 +1995,13 @@
   ++  do-simple-spend
     |=  =cause
     ?>  ?=(%simple-spend -.cause)
-    |^
-    %-  (debug "simple-spend: {<names.cause>}")
-    =/  names=(list nname:transact)  (parse-names names.cause)
-    =/  initial-ledger=ledger  (build-ledger names -.order.cause)
-    =/  ins=(list input:transact)  (create-inputs initial-ledger names -.order.cause)
+    |^  
+    =/  [names order fee sign-key timelock-intent *rest] (weld t.cause ~)
+    =/  memo  ?~  rest  ~  i.rest
+    %-  (debug (cat 5 "simple-spend: {<names>} memo: " (if (~= ~ memo) memo ~)))
+    =/  names=(list nname:transact)  (parse-names names)
+    =/  initial-ledger=ledger  (build-ledger names -.order)
+    =/  ins=(list input:transact)  (create-inputs initial-ledger names -.order)
     (save-draft ins)
     ::
     ++  parse-names

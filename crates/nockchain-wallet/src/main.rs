@@ -283,12 +283,18 @@ pub enum Commands {
         /// Hardened or unhardened child key
         #[arg(short, long, default_value = "false")]
         hardened: bool,
+        /// Optional memo (arbitrary user-supplied data to embed in the transaction)
+        #[arg(long)]
+        memo: Option<String>,
     },
 
     /// Create a transaction from a draft file
     SendTx {
         /// Draft file to create transaction from
         draft: String,
+        /// Optional memo (arbitrary user-supplied data to embed in the transaction)
+        #[arg(long)]
+        memo: Option<String>,
     },
 
     /// Update the wallet balance
@@ -674,6 +680,7 @@ impl Wallet {
         index: Option<u64>,
         hardened: bool,
         timelock_intents: Vec<TimelockIntent>,
+        memo: Option<String>, // <-- renamed parameter
     ) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
 
@@ -833,10 +840,16 @@ impl Wallet {
 
         // Convert timelock intent to noun
         let timelock_intent_noun = timelock_intent.to_noun(&mut slab);
-
+        // Convert memo to noun (as string, or 0 if not present)
+        let memo_noun = if let Some(m) = memo {
+            make_tas(&mut slab, &m).as_noun()
+        } else {
+            D(0)
+        };
+        // Add memo as the last argument
         Self::wallet(
             "simple-spend",
-            &[names_noun, order_noun, fee_noun, sign_key_noun, timelock_intent_noun],
+            &[names_noun, order_noun, fee_noun, sign_key_noun, timelock_intent_noun, memo_noun],
             Operation::Poke,
             &mut slab,
         )
@@ -894,7 +907,7 @@ impl Wallet {
     /// # Arguments
     ///
     /// * `draft_path` - Path to the draft file to create transaction from
-    fn send_tx(draft_path: &str) -> CommandNoun<NounSlab> {
+    fn send_tx(draft_path: &str, memo: Option<String>) -> CommandNoun<NounSlab> {
         // Read and decode the draft file
         let draft_data = fs::read(draft_path)
             .map_err(|e| CrownError::Unknown(format!("Failed to read draft file: {}", e)))?;
@@ -904,7 +917,19 @@ impl Wallet {
             .cue_into(draft_data.as_bytes()?)
             .map_err(|e| CrownError::Unknown(format!("Failed to decode draft data: {}", e)))?;
 
-        Self::wallet("send-tx", &[draft_noun], Operation::Poke, &mut slab)
+        // Convert memo to noun (as string, or 0 if not present)
+        let memo_noun = if let Some(m) = memo {
+            make_tas(&mut slab, &m).as_noun()
+        } else {
+            D(0)
+        };
+        // Add memo as the last argument
+        Self::wallet(
+            "send-tx",
+            &[draft_noun, memo_noun],
+            Operation::Poke,
+            &mut slab,
+        )
     }
 
     /// Lists all public keys in the wallet.
@@ -1082,6 +1107,7 @@ async fn main() -> Result<(), NockAppError> {
             hardened,
             timelock_intent,
             timelock_min,
+            memo,
         } => {
             let parsed_timelock_intent = match timelock_intent.as_str() {
                 "absolute" => {
@@ -1108,9 +1134,10 @@ async fn main() -> Result<(), NockAppError> {
                 *index,
                 *hardened,
                 vec![parsed_timelock_intent],
+                *memo,
             )
         }
-        Commands::SendTx { draft } => Wallet::send_tx(draft),
+        Commands::SendTx { draft, memo } => Wallet::send_tx(draft, *memo),
         Commands::UpdateBalance => Wallet::update_balance(),
         Commands::ExportMasterPubkey => Wallet::export_master_pubkey(),
         Commands::ImportMasterPubkey { key_path } => Wallet::import_master_pubkey(key_path),
@@ -1224,8 +1251,7 @@ mod tests {
         let mut salt = [0u8; 16];
         getrandom(&mut entropy).map_err(|e| CrownError::Unknown(e.to_string()))?;
         getrandom(&mut salt).map_err(|e| CrownError::Unknown(e.to_string()))?;
-        let (noun, op) = Wallet::keygen(&entropy, &salt)?;
-
+        let (noun, op) = Wallet::keygen(&entropy, &salt)
         let wire = WalletWire::Command(Commands::Keygen).to_wire();
 
         let keygen_result = wallet.app.poke(wire, noun.clone()).await?;
@@ -1264,7 +1290,7 @@ mod tests {
         // Generate a new key pair
         let mut entropy = [0u8; 32];
         let mut salt = [0u8; 16];
-        let (noun, op) = Wallet::keygen(&entropy, &salt)?;
+        let (noun, op) = Wallet::keygen(&entropy, &salt)
         let wire = WalletWire::Command(Commands::Keygen).to_wire();
         let _ = wallet.app.poke(wire, noun.clone()).await?;
 
@@ -1272,7 +1298,7 @@ mod tests {
         let index = 0;
         let hardened = true;
         let label = None;
-        let (noun, op) = Wallet::derive_child(index, hardened, &label)?;
+        let (noun, op) = Wallet::derive_child(index, hardened, &label)
 
         let wire = WalletWire::Command(Commands::DeriveChild {
             index,
@@ -1561,6 +1587,7 @@ mod tests {
             None,
             false,
             vec![TimelockIntent::none()],
+            None,
         )?;
         let wire = WalletWire::Command(Commands::SimpleSpend {
             names: names.clone(),
@@ -1571,6 +1598,7 @@ mod tests {
             hardened: false,
             timelock_intent: "none".to_string(),
             timelock_min: None,
+            memo: None,
         })
         .to_wire();
         let spend_result = wallet.app.poke(wire, noun.clone()).await?;
@@ -1606,6 +1634,7 @@ mod tests {
             None,
             false,
             vec![TimelockIntent::none()],
+            None,
         )?;
 
         let wire1 = WalletWire::Command(Commands::GenMasterPrivkey {
@@ -1624,6 +1653,7 @@ mod tests {
             hardened: false,
             timelock_intent: "none".to_string(),
             timelock_min: None,
+            memo: None,
         })
         .to_wire();
         let spend_result = wallet.app.poke(wire2, spend_noun.clone()).await?;
@@ -1691,9 +1721,10 @@ mod tests {
             option_env!("GIT_SHA").unwrap_or("unknown")
         ));
 
-        let (noun, op) = Wallet::send_tx(draft_path)?;
+        let (noun, op) = Wallet::send_tx(draft_path, None)?;
         let wire = WalletWire::Command(Commands::SendTx {
             draft: draft_path.to_string(),
+            memo: None,
         })
         .to_wire();
         let tx_result = wallet.app.poke(wire, noun.clone()).await?;
